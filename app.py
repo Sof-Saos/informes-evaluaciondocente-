@@ -406,22 +406,31 @@ st.markdown('<div class="titulo">Generador de informes docentes</div>', unsafe_a
 st.markdown('<div class="subtitulo">Universidad EAFIT &nbsp;·&nbsp; Evaluación docente</div>',
             unsafe_allow_html=True)
 
+# ── Cargar plantilla desde el repositorio ──
+_PLANTILLA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Plantilla.docx")
+
+@st.cache_data
+def _cargar_plantilla():
+    if os.path.isfile(_PLANTILLA_PATH):
+        with open(_PLANTILLA_PATH, "rb") as f:
+            return f.read()
+    return None
+
+plantilla_bytes = _cargar_plantilla()
+
+if plantilla_bytes is None:
+    st.error("⚠️ No se encontró **Plantilla.docx** en el repositorio. "
+             "Asegúrate de subir ese archivo a GitHub junto con `app.py`.")
+    st.stop()
+
 # ── Sección 1: Archivos ──
 st.markdown('<div class="card"><div class="card-title">📂 Archivos</div>', unsafe_allow_html=True)
 
-col1, col2 = st.columns(2)
-with col1:
-    archivo_excel = st.file_uploader(
-        "Archivo Excel de evaluaciones",
-        type=["xlsx", "xls"],
-        help="El archivo exportado del sistema de evaluación docente"
-    )
-with col2:
-    archivo_plantilla = st.file_uploader(
-        "Plantilla Word (.docx)",
-        type=["docx"],
-        help="La plantilla base para los informes"
-    )
+archivo_excel = st.file_uploader(
+    "Archivo Excel de evaluaciones",
+    type=["xlsx", "xls"],
+    help="El archivo exportado del sistema de evaluación docente"
+)
 
 st.markdown('</div>', unsafe_allow_html=True)
 
@@ -465,7 +474,7 @@ if archivo_excel:
         st.error(f"No se pudo leer el Excel: {e}")
 
 # ── Sección 2: Generar ──
-if profesores and archivo_plantilla:
+if profesores:
     st.markdown('<div class="card"><div class="card-title">⚙️ Generar informes</div>',
                 unsafe_allow_html=True)
 
@@ -485,7 +494,6 @@ if profesores and archivo_plantilla:
     st.markdown('</div>', unsafe_allow_html=True)
 
     if st.button(f"Generar {'informe' if es_uno else str(total) + ' informes'}"):
-        plantilla_bytes = archivo_plantilla.getvalue()
         errores = []
         archivos_generados = {}  # nombre → bytes
 
@@ -533,7 +541,5 @@ if profesores and archivo_plantilla:
                     mime="application/zip",
                 )
 
-elif archivo_excel and not archivo_plantilla:
-    st.info("📄 Ahora sube la **Plantilla Word** para poder generar los informes.")
 elif not archivo_excel:
     st.info("📊 Sube el **archivo Excel** para comenzar.")
