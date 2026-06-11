@@ -4,6 +4,7 @@ Versión web (Streamlit)
 """
 
 import io, os, re, zipfile, random, tempfile
+import math
 from collections import defaultdict
 from copy import deepcopy
 from lxml import etree
@@ -20,7 +21,7 @@ COL_CURSO           = "Nombre Catalogo"
 COL_ID_ESCUELA      = "Id Escuela"
 COL_ESCUELA         = "Escuela"
 COL_COMPETENCIA     = "Competencia Evaluada"
-COL_NOTA_FINAL      = "Nota final por clase"
+COL_NOTA_FINAL      = "Nota competencia por clase"
 COL_NOTA_CURSO      = "Nota final por curso"
 COL_PREGUNTA        = "Pregunta"
 COL_COMENTARIO      = "Comentarios"
@@ -67,66 +68,7 @@ MAYUSCULAS_FIJAS = {"eafit", "covid", "ia", "ti", "zoom", "teams", "meet", "canv
 
 W = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
 
-# ─── LANGUAGETOOL ──────────────────────────────────────────────────────────
-
-import urllib.request
-import urllib.parse
-import json
-import time
-
-_LT_CACHE: dict = {}   # cache para no llamar la API dos veces con el mismo texto
-_LT_URL = "https://api.languagetool.org/v2/check"
-_LT_DISABLED = False   # se pone True si la API falla (fallback silencioso)
-
-def _languagetool_check(texto: str) -> list:
-    """Llama a la API pública de LanguageTool y devuelve la lista de matches."""
-    global _LT_DISABLED
-    if _LT_DISABLED:
-        return []
-    if texto in _LT_CACHE:
-        return _LT_CACHE[texto]
-    try:
-        data = urllib.parse.urlencode({
-            "language": "es",
-            "text": texto,
-            "enabledOnly": "false",
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            _LT_URL, data=data,
-            headers={"Content-Type": "application/x-www-form-urlencoded",
-                     "User-Agent": "EXA-InformeDocente/1.0"},
-        )
-        with urllib.request.urlopen(req, timeout=6) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-        matches = result.get("matches", [])
-        _LT_CACHE[texto] = matches
-        return matches
-    except Exception:
-        _LT_DISABLED = True   # si falla (sin internet, rate limit, etc.) no reintentar
-        return []
-
-def _aplicar_correcciones_lt(texto: str) -> str:
-    """Aplica las sugerencias de LanguageTool al texto (primera sugerencia por match)."""
-    matches = _languagetool_check(texto)
-    if not matches:
-        return texto
-    # Ordenar de atrás hacia adelante para no desplazar offsets
-    matches_sorted = sorted(matches, key=lambda m: m["offset"], reverse=True)
-    resultado = texto
-    for m in matches_sorted:
-        replacements = m.get("replacements", [])
-        if not replacements:
-            continue
-        # Solo aplicar correcciones de ortografía y tipografía, NO de estilo
-        rule_id = m.get("rule", {}).get("id", "")
-        issue_type = m.get("rule", {}).get("issueType", "")
-        if issue_type not in ("misspelling", "typographical"):
-            continue
-        mejor = replacements[0]["value"]
-        offset = m["offset"]
-        length = m["length"]
-        resultado = resultado[:offset] + mejor + resultado[offset + length:]
-    return resultado
+# ─── (LanguageTool eliminado por rendimiento) ──────────────────────────────
 
 # ─── HELPERS ───────────────────────────────────────────────────────────────
 
@@ -195,15 +137,11 @@ def _sentence_case(texto: str) -> str:
     return texto_f
 
 def formatear_comentario(texto: str) -> str:
-    """Pipeline completo: sentence case → corrección ortográfica (LanguageTool)."""
+    """Sentence case únicamente (LanguageTool eliminado por rendimiento)."""
     texto = str(texto).strip()
     if not texto:
         return texto
-    # 1. Sentence case
     texto = _sentence_case(texto)
-    # 2. Corrección ortográfica con LanguageTool (gratuito, sin API key)
-    texto = _aplicar_correcciones_lt(texto)
-    # 3. Asegurar que después de LT la primera letra sigue en mayúscula
     if texto:
         texto = texto[0].upper() + texto[1:]
     return texto
@@ -263,6 +201,7 @@ def leer_excel(archivo_bytes: bytes) -> dict:
         "info": {}, "nota_final": None, "nota_curso": None,
         "comentarios": defaultdict(list),
         "total_generadas": None, "evaluaciones_realizadas": None,
+        "notas_competencias": {},  # competencia → nota
     })
 
     for row in ws.iter_rows(min_row=FILA_DATOS, values_only=True):
@@ -300,6 +239,10 @@ def leer_excel(archivo_bytes: bytes) -> dict:
             p["nota_final"] = nota_final
         if nota_curso and nota_curso > 0 and p["nota_curso"] is None:
             p["nota_curso"] = nota_curso
+
+        if comp and comp != "Comentarios" and nota_final and nota_final > 0:
+            if comp not in p["notas_competencias"]:
+                p["notas_competencias"][comp] = nota_final
 
         if comp == "Comentarios" and pregunta and comentario:
             if es_valido(str(comentario)):
@@ -405,6 +348,107 @@ def generar_informe_bytes(nombre: str, datos: dict,
                 zout.writestr(item, new_xml if item.filename == 'word/document.xml'
                               else zin.read(item.filename))
     return out_buf.getvalue(), nombre_archivo
+
+# ─── SPIDER CHART ───────────────────────────────────────────────────────────
+
+def _spider_chart_svg(notas: dict) -> str:
+    """Genera un SVG con diagrama de araña para las notas de competencias (0–5)."""
+    labels = list(notas.keys())
+    values = [min(max(float(v), 0), 5) for v in notas.values()]
+    n = len(labels)
+    if n < 3:
+        return ""
+
+    cx, cy, r = 220, 210, 150
+    W_total, H_total = 440, 420
+    MAX_VAL = 5
+    LEVELS = 5
+    color_fill   = "rgba(0,75,133,0.35)"
+    color_stroke = "#FFB903"
+    color_grid   = "#2A2A32"
+    color_axis   = "#3A3A44"
+    color_label  = "#C8CAD4"
+    color_dot    = "#FFB903"
+
+    angles = [math.pi / 2 + 2 * math.pi * i / n for i in range(n)]
+
+    def pt(val, angle):
+        frac = val / MAX_VAL
+        x = cx + r * frac * math.cos(angle)
+        y = cy - r * frac * math.sin(angle)
+        return x, y
+
+    # Grid rings
+    rings_svg = ""
+    for level in range(1, LEVELS + 1):
+        pts = [pt(MAX_VAL * level / LEVELS, a) for a in angles]
+        poly = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+        rings_svg += f'<polygon points="{poly}" fill="none" stroke="{color_grid}" stroke-width="1"/>\n'
+
+    # Axes
+    axes_svg = ""
+    for a in angles:
+        ex, ey = pt(MAX_VAL, a)
+        axes_svg += f'<line x1="{cx}" y1="{cy}" x2="{ex:.1f}" y2="{ey:.1f}" stroke="{color_axis}" stroke-width="1"/>\n'
+
+    # Data polygon
+    data_pts = [pt(v, a) for v, a in zip(values, angles)]
+    poly_str = " ".join(f"{x:.1f},{y:.1f}" for x, y in data_pts)
+    data_svg = f'<polygon points="{poly_str}" fill="{color_fill}" stroke="{color_stroke}" stroke-width="2"/>\n'
+    dots_svg = "".join(
+        f'<circle cx="{x:.1f}" cy="{y:.1f}" r="5" fill="{color_dot}" stroke="#000" stroke-width="1.5"/>\n'
+        for x, y in data_pts
+    )
+
+    # Score labels near dots
+    score_labels = ""
+    for (x, y), v in zip(data_pts, values):
+        score_labels += f'<text x="{x:.1f}" y="{y-9:.1f}" text-anchor="middle" font-size="10" fill="#FFB903" font-weight="600">{v:.2f}</text>\n'
+
+    # Axis labels
+    label_svg = ""
+    for i, (label, a) in enumerate(zip(labels, angles)):
+        lx, ly = pt(MAX_VAL * 1.22, a)
+        anchor = "middle"
+        if lx < cx - 10: anchor = "end"
+        elif lx > cx + 10: anchor = "start"
+        # Word wrap at ~14 chars
+        words = label.split()
+        lines = []
+        cur = ""
+        for w in words:
+            if len(cur) + len(w) + 1 <= 14:
+                cur = (cur + " " + w).strip()
+            else:
+                if cur: lines.append(cur)
+                cur = w
+        if cur: lines.append(cur)
+        line_h = 13
+        total_h = len(lines) * line_h
+        start_dy = -(total_h / 2) + 4
+        tspans = "".join(
+            f'<tspan x="{lx:.1f}" dy="{start_dy + j*line_h:.0f}">{ln}</tspan>'
+            for j, ln in enumerate(lines)
+        )
+        label_svg += f'<text text-anchor="{anchor}" font-size="11" fill="{color_label}" font-family="Inter,sans-serif">{tspans}</text>\n'
+
+    # Level numbers on first axis
+    level_labels = ""
+    ax0 = angles[0]
+    for level in range(1, LEVELS + 1):
+        lx, ly = pt(MAX_VAL * level / LEVELS, ax0)
+        level_labels += f'<text x="{lx+6:.1f}" y="{ly:.1f}" font-size="9" fill="#4A5068">{level}</text>\n'
+
+    return f"""<svg viewBox="0 0 {W_total} {H_total}" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:440px;display:block;margin:auto">
+  {rings_svg}
+  {axes_svg}
+  {data_svg}
+  {dots_svg}
+  {score_labels}
+  {label_svg}
+  {level_labels}
+</svg>"""
+
 
 # ─── INTERFAZ STREAMLIT ────────────────────────────────────────────────────
 
@@ -707,31 +751,6 @@ if plantilla_bytes is None:
              "Asegúrate de subir ese archivo a GitHub junto con `app.py`.")
     st.stop()
 
-# ── Estado LanguageTool (se verifica una vez) ──
-@st.cache_data(ttl=300)
-def _verificar_lt() -> bool:
-    """Verifica si LanguageTool API está disponible. Cachea por 5 min."""
-    try:
-        data = urllib.parse.urlencode({"language": "es", "text": "prueba"}).encode("utf-8")
-        req = urllib.request.Request(
-            _LT_URL, data=data,
-            headers={"Content-Type": "application/x-www-form-urlencoded",
-                     "User-Agent": "EXA-InformeDocente/1.0"},
-        )
-        with urllib.request.urlopen(req, timeout=5):
-            pass
-        return True
-    except Exception:
-        return False
-
-_lt_disponible = _verificar_lt()
-_estado_lt = (
-    '<span style="color:#16A34A;font-size:0.75rem">● Corrección ortográfica activa</span>'
-    if _lt_disponible else
-    '<span style="color:#4A5068;font-size:0.75rem">○ Corrección ortográfica no disponible</span>'
-)
-st.markdown(f'<div style="text-align:right;margin-top:-1.2rem;margin-bottom:1rem">{_estado_lt}</div>',
-            unsafe_allow_html=True)
 
 
 st.markdown('<div class="card"><div class="card-label">📂 Archivos</div>', unsafe_allow_html=True)
@@ -779,6 +798,32 @@ if archivo_excel:
         </table>
         """, unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
+
+        # ── Diagrama de araña por competencias ──
+        if len(profesores) == 1:
+            nombre_unico, datos_unicos = next(iter(profesores.items()))
+            notas_comp = datos_unicos.get("notas_competencias", {})
+            if notas_comp and len(notas_comp) >= 3:
+                st.markdown('<div class="card"><div class="card-label">🕸️ Competencias evaluadas</div>',
+                            unsafe_allow_html=True)
+                svg = _spider_chart_svg(notas_comp)
+                if svg:
+                    st.markdown(svg, unsafe_allow_html=True)
+                st.markdown('</div>', unsafe_allow_html=True)
+        else:
+            # Múltiples profesores: mostrar araña por cada uno en expander
+            any_comp = any(d.get("notas_competencias") for d in profesores.values())
+            if any_comp:
+                st.markdown('<div class="card"><div class="card-label">🕸️ Competencias evaluadas</div>',
+                            unsafe_allow_html=True)
+                for nombre, datos in profesores.items():
+                    notas_comp = datos.get("notas_competencias", {})
+                    if notas_comp and len(notas_comp) >= 3:
+                        with st.expander(nombre.title()):
+                            svg = _spider_chart_svg(notas_comp)
+                            if svg:
+                                st.markdown(svg, unsafe_allow_html=True)
+                st.markdown('</div>', unsafe_allow_html=True)
 
     except Exception as e:
         st.error(f"No se pudo leer el Excel: {e}")
