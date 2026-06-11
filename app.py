@@ -304,107 +304,281 @@ st.set_page_config(
     layout="centered",
 )
 
-# ── Estilos ──
+# ── Colores oficiales EAFIT ──
+# Azul:     #004B85   Amarillo: #FFB903
+# Negro:    #000000   Superficie: #0C0C0E  Borde: #1C1C22
+
 st.markdown("""
 <style>
-    /* Fondo principal */
-    .stApp { background-color: #1e1e2e; color: #ececf1; }
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
-    /* Franja roja superior */
-    .header-bar {
-        background: #c0392b;
-        height: 6px;
-        border-radius: 2px;
-        margin-bottom: 1.2rem;
-    }
+  /* ── BASE ── */
+  html, body, .stApp {
+    background-color: #000000 !important;
+    color: #E8EAF0 !important;
+    font-family: 'Inter', sans-serif !important;
+  }
+  .block-container {
+    padding-top: 0 !important;
+    padding-bottom: 2rem !important;
+    max-width: 720px !important;
+  }
 
-    /* Título */
-    .titulo { font-size: 1.6rem; font-weight: 700; color: #ececf1; margin-bottom: 0; }
-    .subtitulo { font-size: 0.9rem; color: #7f8c9a; margin-top: 2px; margin-bottom: 1.5rem; }
+  /* ── HEADER ── */
+  .exa-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1.6rem 0 1.4rem 0;
+    border-bottom: 1px solid #1C1C22;
+    margin-bottom: 2rem;
+  }
+  .exa-header-left {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+  .exa-logo img {
+    height: 38px;
+    width: auto;
+    display: block;
+  }
+  .exa-divider-v {
+    width: 1px;
+    height: 36px;
+    background: #1C1C22;
+  }
+  .exa-title-block {}
+  .exa-title {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: #FFFFFF;
+    line-height: 1.25;
+    letter-spacing: -0.01em;
+    margin: 0;
+  }
+  .exa-subtitle {
+    font-size: 0.76rem;
+    color: #4A5068;
+    margin: 3px 0 0 0;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .exa-badge {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: #000000;
+    background: #FFB903;
+    padding: 3px 10px;
+    border-radius: 20px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
 
-    /* Tarjetas de sección */
-    .card {
-        background: #2a2a3d;
-        border-radius: 10px;
-        padding: 1.4rem 1.6rem;
-        margin-bottom: 1.2rem;
-    }
-    .card-title {
-        font-size: 0.78rem;
-        font-weight: 600;
-        color: #7f8c9a;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        margin-bottom: 0.8rem;
-    }
+  /* ── ACCENT LINE ── */
+  .exa-accent-line {
+    height: 2px;
+    background: linear-gradient(90deg, #004B85 0%, #FFB903 60%, transparent 100%);
+    margin-bottom: 2rem;
+    border-radius: 2px;
+  }
 
-    /* Inputs */
-    .stTextInput > div > div > input {
-        background: #12121e !important;
-        color: #ececf1 !important;
-        border: 1px solid #3a3a55 !important;
-        border-radius: 6px !important;
-    }
+  /* ── CARDS ── */
+  .card {
+    background: #0C0C0E;
+    border: 1px solid #1C1C22;
+    border-radius: 12px;
+    padding: 1.4rem 1.6rem;
+    margin-bottom: 1.2rem;
+  }
+  .card-label {
+    font-size: 0.68rem;
+    font-weight: 700;
+    color: #FFB903;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    margin-bottom: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .card-label::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: #1C1C22;
+  }
 
-    /* File uploader */
-    .stFileUploader > div {
-        background: #12121e !important;
-        border: 1.5px dashed #3a3a55 !important;
-        border-radius: 8px !important;
-        color: #7f8c9a !important;
-    }
+  /* ── INPUTS ── */
+  .stTextInput > div > div > input {
+    background: #070709 !important;
+    color: #E8EAF0 !important;
+    border: 1px solid #1C1C22 !important;
+    border-radius: 8px !important;
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.88rem !important;
+  }
+  .stTextInput > div > div > input:focus {
+    border-color: #004B85 !important;
+    box-shadow: 0 0 0 3px rgba(0,75,133,0.2) !important;
+  }
+  .stTextInput label {
+    color: #9399A8 !important;
+    font-size: 0.82rem !important;
+    font-weight: 500 !important;
+  }
 
-    /* Botón primario */
-    .stButton > button {
-        background: #c0392b !important;
-        color: white !important;
-        border: none !important;
-        border-radius: 7px !important;
-        font-weight: 600 !important;
-        padding: 0.55rem 1.6rem !important;
-        font-size: 1rem !important;
-        transition: background 0.2s;
-    }
-    .stButton > button:hover {
-        background: #e74c3c !important;
-    }
+  /* ── FILE UPLOADER ── */
+  .stFileUploader > div {
+    background: #070709 !important;
+    border: 1.5px dashed #1C1C22 !important;
+    border-radius: 10px !important;
+    transition: border-color 0.2s;
+  }
+  .stFileUploader > div:hover {
+    border-color: #004B85 !important;
+  }
+  .stFileUploader label {
+    color: #9399A8 !important;
+    font-size: 0.82rem !important;
+    font-weight: 500 !important;
+  }
+  /* Upload icon/text color */
+  .stFileUploader [data-testid="stFileUploaderDropzone"] p,
+  .stFileUploader [data-testid="stFileUploaderDropzone"] span {
+    color: #4A5068 !important;
+  }
 
-    /* Botón de descarga */
-    .stDownloadButton > button {
-        background: #27ae60 !important;
-        color: white !important;
-        border: none !important;
-        border-radius: 7px !important;
-        font-weight: 600 !important;
-        font-size: 1rem !important;
-        padding: 0.55rem 1.6rem !important;
-    }
-    .stDownloadButton > button:hover { background: #2ecc71 !important; }
+  /* ── BUTTON PRIMARY ── */
+  .stButton > button {
+    background: #004B85 !important;
+    color: #FFFFFF !important;
+    border: none !important;
+    border-radius: 8px !important;
+    font-family: 'Inter', sans-serif !important;
+    font-weight: 600 !important;
+    font-size: 0.9rem !important;
+    padding: 0.55rem 1.6rem !important;
+    letter-spacing: 0.01em;
+    transition: background 0.15s, box-shadow 0.15s !important;
+  }
+  .stButton > button:hover {
+    background: #005FA8 !important;
+    box-shadow: 0 0 0 3px rgba(0,75,133,0.25) !important;
+  }
+  .stButton > button:active { background: #003D6E !important; }
 
-    /* Info / success / warning */
-    .stAlert { border-radius: 8px !important; }
+  /* ── BUTTON DOWNLOAD ── */
+  .stDownloadButton > button {
+    background: #FFB903 !important;
+    color: #000000 !important;
+    border: none !important;
+    border-radius: 8px !important;
+    font-family: 'Inter', sans-serif !important;
+    font-weight: 700 !important;
+    font-size: 0.9rem !important;
+    padding: 0.55rem 1.6rem !important;
+    transition: background 0.15s, box-shadow 0.15s !important;
+  }
+  .stDownloadButton > button:hover {
+    background: #FFC72C !important;
+    box-shadow: 0 0 0 3px rgba(255,185,3,0.25) !important;
+  }
 
-    /* Tabla de preview */
-    .preview-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-    .preview-table th {
-        background: #1e1e2e; color: #7f8c9a;
-        padding: 6px 10px; text-align: left;
-        font-weight: 600; font-size: 0.75rem;
-        text-transform: uppercase; letter-spacing: 0.06em;
-    }
-    .preview-table td { padding: 7px 10px; color: #ececf1; border-bottom: 1px solid #1e1e2e; }
-    .preview-table tr:last-child td { border-bottom: none; }
+  /* ── PROGRESS BAR ── */
+  .stProgress > div > div {
+    background: #1C1C22 !important;
+    border-radius: 4px !important;
+  }
+  .stProgress > div > div > div {
+    background: linear-gradient(90deg, #004B85, #FFB903) !important;
+    border-radius: 4px !important;
+  }
 
-    /* Ocultar menú de Streamlit */
-    #MainMenu, footer, header { visibility: hidden; }
+  /* ── ALERTS ── */
+  .stAlert {
+    background: #0C0C0E !important;
+    border-radius: 8px !important;
+    border-left-width: 3px !important;
+  }
+  [data-testid="stAlert"][kind="info"] {
+    border-color: #004B85 !important;
+  }
+  [data-testid="stAlert"][kind="success"] {
+    border-color: #16A34A !important;
+  }
+  [data-testid="stAlert"][kind="error"] {
+    border-color: #DC2626 !important;
+  }
+
+  /* ── SPINNER ── */
+  .stSpinner > div { border-top-color: #FFB903 !important; }
+
+  /* ── PREVIEW TABLE ── */
+  .preview-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82rem;
+    margin-top: 0.4rem;
+  }
+  .preview-table thead tr {
+    border-bottom: 1px solid #004B85;
+  }
+  .preview-table th {
+    background: transparent;
+    color: #4A5068;
+    padding: 6px 10px;
+    text-align: left;
+    font-weight: 600;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+  .preview-table td {
+    padding: 9px 10px;
+    color: #C8CAD4;
+    border-bottom: 1px solid #111116;
+    vertical-align: middle;
+  }
+  .preview-table tr:last-child td { border-bottom: none; }
+  .preview-table tr:hover td { background: #0F0F13; }
+  .preview-table .name-cell { color: #FFFFFF; font-weight: 600; }
+  .preview-table .file-cell { color: #4A5068; font-family: 'Courier New', monospace; font-size: 0.74rem; }
+  .badge-ciclo {
+    display: inline-block;
+    background: #111116;
+    color: #FFB903;
+    border: 1px solid #1C1C22;
+    border-radius: 4px;
+    padding: 1px 7px;
+    font-size: 0.72rem;
+    font-weight: 600;
+  }
+
+  /* ── HIDE STREAMLIT CHROME ── */
+  #MainMenu, footer, header { visibility: hidden; }
+  [data-testid="stDecoration"] { display: none; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Encabezado ──
-st.markdown('<div class="header-bar"></div>', unsafe_allow_html=True)
-st.markdown('<div class="titulo">Generador de informes docentes</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitulo">Universidad EAFIT &nbsp;·&nbsp; Evaluación docente</div>',
-            unsafe_allow_html=True)
+# ── Header ──
+st.markdown("""
+<div class="exa-header">
+  <div class="exa-header-left">
+    <div class="exa-logo">
+      <img src="https://www.eafit.edu.co/sites/default/files/2024-07/logo_EAFIT_blanco.svg"
+           alt="EAFIT" />
+    </div>
+    <div class="exa-divider-v"></div>
+    <div class="exa-title-block">
+      <div class="exa-title">Informes de evaluación docente</div>
+      <div class="exa-subtitle">Centro para la Excelencia en el Aprendizaje · EXA</div>
+    </div>
+  </div>
+  <div class="exa-badge">EXA</div>
+</div>
+<div class="exa-accent-line"></div>
+""", unsafe_allow_html=True)
 
 # ── Cargar plantilla desde el repositorio ──
 _PLANTILLA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Plantilla.docx")
@@ -424,7 +598,7 @@ if plantilla_bytes is None:
     st.stop()
 
 # ── Sección 1: Archivos ──
-st.markdown('<div class="card"><div class="card-title">📂 Archivos</div>', unsafe_allow_html=True)
+st.markdown('<div class="card"><div class="card-label">📂 Archivos</div>', unsafe_allow_html=True)
 
 archivo_excel = st.file_uploader(
     "Archivo Excel de evaluaciones",
@@ -441,7 +615,7 @@ if archivo_excel:
         with st.spinner("Leyendo Excel…"):
             profesores = leer_excel(archivo_excel.getvalue())
 
-        st.markdown('<div class="card"><div class="card-title">👥 Profesores encontrados</div>',
+        st.markdown('<div class="card"><div class="card-label">👥 Profesores encontrados</div>',
                     unsafe_allow_html=True)
 
         filas_html = ""
@@ -450,11 +624,11 @@ if archivo_excel:
             nf   = nombre_archivo_defecto(datos, nombre)
             filas_html += f"""
             <tr>
-              <td><strong>{nombre.title()}</strong></td>
+              <td class="name-cell">{nombre.title()}</td>
               <td>{info.get('curso','—')}</td>
               <td>{info.get('escuela','—')}</td>
-              <td>{info.get('ciclo','—')}</td>
-              <td style="color:#7f8c9a;font-size:0.78rem">{nf}.docx</td>
+              <td><span class="badge-ciclo">{info.get('ciclo','—')}</span></td>
+              <td class="file-cell">{nf}.docx</td>
             </tr>"""
 
         st.markdown(f"""
@@ -475,7 +649,7 @@ if archivo_excel:
 
 # ── Sección 2: Generar ──
 if profesores:
-    st.markdown('<div class="card"><div class="card-title">⚙️ Generar informes</div>',
+    st.markdown('<div class="card"><div class="card-label">⚙️ Generar informes</div>',
                 unsafe_allow_html=True)
 
     total = len(profesores)
