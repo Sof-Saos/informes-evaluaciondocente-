@@ -183,7 +183,17 @@ def clone_bullet_para(template_para):
 
 # ─── LECTURA EXCEL ─────────────────────────────────────────────────────────
 
-def leer_excel(archivo_bytes: bytes) -> dict:
+COL_CATALOGO = "Catálogo"
+COL_NCLASE   = "Nº Clase"
+
+def leer_excel(archivo_bytes: bytes,
+               filtro_catalogo: str = None,
+               filtro_clase: str = None) -> dict:
+    """
+    Lee el Excel de evaluaciones docentes.
+    Si se pasan filtro_catalogo y filtro_clase, solo procesa las filas
+    que coincidan con esa combinación (mucho más rápido).
+    """
     wb = openpyxl.load_workbook(io.BytesIO(archivo_bytes), read_only=True)
     ws = wb.active
 
@@ -197,16 +207,30 @@ def leer_excel(archivo_bytes: bytes) -> dict:
         idx = headers.get(nombre)
         return row_data[idx] if idx is not None and idx < len(row_data) else None
 
+    # Normalizar filtros
+    f_cat   = str(filtro_catalogo).strip().upper() if filtro_catalogo else None
+    f_clase = str(filtro_clase).strip() if filtro_clase else None
+
     profesores = defaultdict(lambda: {
         "info": {}, "nota_final": None, "nota_curso": None,
         "comentarios": defaultdict(list),
         "total_generadas": None, "evaluaciones_realizadas": None,
-        "notas_competencias": {},  # competencia → nota
+        "notas_competencias": {},
     })
 
     for row in ws.iter_rows(min_row=FILA_DATOS, values_only=True):
         nombre = col(row, COL_NOMBRE)
         if not nombre: continue
+
+        # Aplicar filtro si se indicó
+        if f_cat or f_clase:
+            cat_row   = str(col(row, COL_CATALOGO) or "").strip().upper()
+            clase_row = str(col(row, COL_NCLASE) or "").strip()
+            if f_cat and cat_row != f_cat:
+                continue
+            if f_clase and clase_row != f_clase:
+                continue
+
         nombre = str(nombre).strip()
         p = profesores[nombre]
 
@@ -283,28 +307,94 @@ def generar_informe_bytes(nombre: str, datos: dict,
     replace_in_subtree(p0, ' del semestre',        '')
     replace_in_subtree(p0, 'NOMBRE PROFESOR',      nombre)
 
-    # ── Tabla competencias ──
+    # ── Tabla / gráfico competencias ──
     tbl_comp = body_children[3]
-    for t in tbl_comp.iter(W+'t'):
-        if t.text and ('final_course_note' in t.text or t.text.strip() in ('{{', '}}', '{', '}')):
-            t.text = ''
-    nota_str  = fmt_nota(nota_tabla)
-    data_rows = tbl_comp.findall('.//' + W+'tr')[1:]
-    for row in data_rows:
-        cells = row.findall(W+'tc')
-        if len(cells) >= 2:
-            nota_cell = cells[1]
-            for t in nota_cell.iter(W+'t'):
+    notas_comp = datos.get("notas_competencias", {})
+
+    if notas_comp and len(notas_comp) >= 3:
+        # Generar PNG del diagrama de araña e insertarlo como imagen en el docx
+        png_bytes  = _spider_chart_png(notas_comp)
+        img_rid    = "rIdSpider"
+        img_name   = "spider_chart.png"
+        img_target = f"media/{img_name}"
+
+        # Construir elemento <w:p> con la imagen inline
+        # Tamaño: ~10 cm de ancho (EMU: 1 cm = 914400 / 100 * 10 = 3600000... → 1 cm = 360000 EMU, 10 cm = 3600000)
+        EMU_W = 4200000   # ~11.7 cm
+        EMU_H = 4200000
+
+        draw_xml = (
+            f'<w:p xmlns:w="{W[1:-1]}"'
+            f' xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"'
+            f' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+            f' xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"'
+            f' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            f'<w:pPr><w:jc w:val="center"/></w:pPr>'
+            f'<w:r><w:rPr/><w:drawing>'
+            f'<wp:inline distT="0" distB="0" distL="0" distR="0">'
+            f'<wp:extent cx="{EMU_W}" cy="{EMU_H}"/>'
+            f'<wp:effectExtent l="0" t="0" r="0" b="0"/>'
+            f'<wp:docPr id="1" name="SpiderChart"/>'
+            f'<wp:cNvGraphicFramePr>'
+            f'<a:graphicFrameLocks xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" noChangeAspect="1"/>'
+            f'</wp:cNvGraphicFramePr>'
+            f'<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+            f'<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+            f'<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">'
+            f'<pic:nvPicPr>'
+            f'<pic:cNvPr id="0" name="{img_name}"/>'
+            f'<pic:cNvPicPr/>'
+            f'</pic:nvPicPr>'
+            f'<pic:blipFill>'
+            f'<a:blip r:embed="{img_rid}"/>'
+            f'<a:stretch><a:fillRect/></a:stretch>'
+            f'</pic:blipFill>'
+            f'<pic:spPr>'
+            f'<a:xfrm><a:off x="0" y="0"/><a:ext cx="{EMU_W}" cy="{EMU_H}"/></a:xfrm>'
+            f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
+            f'</pic:spPr>'
+            f'</pic:pic>'
+            f'</a:graphicData>'
+            f'</a:graphic>'
+            f'</wp:inline>'
+            f'</w:drawing></w:r></w:p>'
+        )
+        img_para = etree.fromstring(draw_xml)
+
+        # Insertar el párrafo de imagen donde estaba la tabla, luego eliminar la tabla
+        tbl_pos = list(body).index(tbl_comp)
+        body.remove(tbl_comp)
+        body.insert(tbl_pos, img_para)
+
+        # Guardar la imagen y actualizar relationships en el zip de salida
+        _spider_png_data   = png_bytes
+        _spider_img_rid    = img_rid
+        _spider_img_target = img_target
+    else:
+        # Sin datos de competencias: limpiar placeholders de la tabla original
+        for t in tbl_comp.iter(W+'t'):
+            if t.text and ('final_course_note' in t.text or t.text.strip() in ('{{', '}}', '{', '}')):
                 t.text = ''
-            paras = nota_cell.findall('.//' + W+'p')
-            if paras:
-                runs = paras[0].findall('.//' + W+'r')
-                if runs:
-                    t_elems = runs[0].findall(W+'t')
-                    if t_elems:
-                        t_elems[0].text = nota_str
-                    else:
-                        etree.SubElement(runs[0], W+'t').text = nota_str
+        nota_str  = fmt_nota(nota_tabla)
+        data_rows = tbl_comp.findall('.//' + W+'tr')[1:]
+        for row in data_rows:
+            cells = row.findall(W+'tc')
+            if len(cells) >= 2:
+                nota_cell = cells[1]
+                for t in nota_cell.iter(W+'t'):
+                    t.text = ''
+                paras = nota_cell.findall('.//' + W+'p')
+                if paras:
+                    runs = paras[0].findall('.//' + W+'r')
+                    if runs:
+                        t_elems = runs[0].findall(W+'t')
+                        if t_elems:
+                            t_elems[0].text = nota_str
+                        else:
+                            etree.SubElement(runs[0], W+'t').text = nota_str
+        _spider_png_data   = None
+        _spider_img_rid    = None
+        _spider_img_target = None
 
     # ── Tabla estudiantes ──
     tbl_est = body_children[5]
@@ -345,109 +435,95 @@ def generar_informe_bytes(nombre: str, datos: dict,
     with zipfile.ZipFile(io.BytesIO(plantilla_bytes), 'r') as zin:
         with zipfile.ZipFile(out_buf, 'w', zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
-                zout.writestr(item, new_xml if item.filename == 'word/document.xml'
-                              else zin.read(item.filename))
+                if item.filename == 'word/document.xml':
+                    zout.writestr(item, new_xml)
+                elif _spider_png_data and item.filename == 'word/_rels/document.xml.rels':
+                    # Inyectar la relationship de la imagen
+                    rels_xml = zin.read(item.filename)
+                    rels_tree = etree.fromstring(rels_xml)
+                    REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+                    new_rel = etree.SubElement(rels_tree, f"{{{REL_NS}}}Relationship")
+                    new_rel.set("Id", _spider_img_rid)
+                    new_rel.set("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")
+                    new_rel.set("Target", _spider_img_target)
+                    zout.writestr(item, etree.tostring(rels_tree, xml_declaration=True,
+                                                       encoding='UTF-8', standalone=True))
+                else:
+                    zout.writestr(item, zin.read(item.filename))
+            # Escribir el PNG de la araña dentro del zip
+            if _spider_png_data:
+                zout.writestr(f"word/{_spider_img_target}", _spider_png_data)
     return out_buf.getvalue(), nombre_archivo
 
-# ─── SPIDER CHART ───────────────────────────────────────────────────────────
+# ─── SPIDER CHART PNG (para insertar en Word) ───────────────────────────────
 
-def _spider_chart_svg(notas: dict) -> str:
-    """Genera un SVG con diagrama de araña para las notas de competencias (0–5)."""
+def _spider_chart_png(notas: dict) -> bytes:
+    """
+    Genera el diagrama de araña como PNG en memoria usando matplotlib.
+    Retorna los bytes del PNG.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
     labels = list(notas.keys())
     values = [min(max(float(v), 0), 5) for v in notas.values()]
     n = len(labels)
-    if n < 3:
-        return ""
 
-    cx, cy, r = 220, 210, 150
-    W_total, H_total = 440, 420
-    MAX_VAL = 5
-    LEVELS = 5
-    color_fill   = "rgba(0,75,133,0.35)"
-    color_stroke = "#FFB903"
-    color_grid   = "#2A2A32"
-    color_axis   = "#3A3A44"
-    color_label  = "#C8CAD4"
-    color_dot    = "#FFB903"
+    # Ángulos para cada eje (cerrar el polígono repitiendo el primero)
+    angles = np.linspace(0, 2 * np.pi, n, endpoint=False).tolist()
+    angles += angles[:1]
+    values_plot = values + values[:1]
 
-    angles = [math.pi / 2 + 2 * math.pi * i / n for i in range(n)]
+    fig, ax = plt.subplots(figsize=(5.5, 5.5), subplot_kw=dict(polar=True))
+    fig.patch.set_facecolor("white")
+    ax.set_facecolor("white")
 
-    def pt(val, angle):
-        frac = val / MAX_VAL
-        x = cx + r * frac * math.cos(angle)
-        y = cy - r * frac * math.sin(angle)
-        return x, y
+    # Colores EAFIT
+    C_BLUE   = "#004B85"
+    C_YELLOW = "#FFB903"
+    C_GRID   = "#CCCCCC"
 
-    # Grid rings
-    rings_svg = ""
-    for level in range(1, LEVELS + 1):
-        pts = [pt(MAX_VAL * level / LEVELS, a) for a in angles]
-        poly = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
-        rings_svg += f'<polygon points="{poly}" fill="none" stroke="{color_grid}" stroke-width="1"/>\n'
+    # Rejilla y niveles
+    ax.set_ylim(0, 5)
+    ax.set_yticks([1, 2, 3, 4, 5])
+    ax.set_yticklabels(["1", "2", "3", "4", "5"], color="#888888", fontsize=7)
+    ax.yaxis.set_tick_params(labelsize=7)
+    ax.grid(color=C_GRID, linewidth=0.8, linestyle="--", alpha=0.7)
+    ax.spines["polar"].set_color(C_GRID)
 
-    # Axes
-    axes_svg = ""
-    for a in angles:
-        ex, ey = pt(MAX_VAL, a)
-        axes_svg += f'<line x1="{cx}" y1="{cy}" x2="{ex:.1f}" y2="{ey:.1f}" stroke="{color_axis}" stroke-width="1"/>\n'
+    # Ejes con etiquetas
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(labels, fontsize=8.5, color="#222222",
+                       fontfamily="DejaVu Sans", wrap=True)
+    # Ajuste de padding para etiquetas largas
+    ax.tick_params(axis='x', pad=10)
 
-    # Data polygon
-    data_pts = [pt(v, a) for v, a in zip(values, angles)]
-    poly_str = " ".join(f"{x:.1f},{y:.1f}" for x, y in data_pts)
-    data_svg = f'<polygon points="{poly_str}" fill="{color_fill}" stroke="{color_stroke}" stroke-width="2"/>\n'
-    dots_svg = "".join(
-        f'<circle cx="{x:.1f}" cy="{y:.1f}" r="5" fill="{color_dot}" stroke="#000" stroke-width="1.5"/>\n'
-        for x, y in data_pts
-    )
+    # Polígono de datos
+    ax.plot(angles, values_plot, color=C_BLUE, linewidth=2, linestyle="solid")
+    ax.fill(angles, values_plot, color=C_BLUE, alpha=0.25)
 
-    # Score labels near dots
-    score_labels = ""
-    for (x, y), v in zip(data_pts, values):
-        score_labels += f'<text x="{x:.1f}" y="{y-9:.1f}" text-anchor="middle" font-size="10" fill="#FFB903" font-weight="600">{v:.2f}</text>\n'
-
-    # Axis labels
-    label_svg = ""
-    for i, (label, a) in enumerate(zip(labels, angles)):
-        lx, ly = pt(MAX_VAL * 1.22, a)
-        anchor = "middle"
-        if lx < cx - 10: anchor = "end"
-        elif lx > cx + 10: anchor = "start"
-        # Word wrap at ~14 chars
-        words = label.split()
-        lines = []
-        cur = ""
-        for w in words:
-            if len(cur) + len(w) + 1 <= 14:
-                cur = (cur + " " + w).strip()
-            else:
-                if cur: lines.append(cur)
-                cur = w
-        if cur: lines.append(cur)
-        line_h = 13
-        total_h = len(lines) * line_h
-        start_dy = -(total_h / 2) + 4
-        tspans = "".join(
-            f'<tspan x="{lx:.1f}" dy="{start_dy + j*line_h:.0f}">{ln}</tspan>'
-            for j, ln in enumerate(lines)
+    # Puntos y etiquetas de puntaje
+    for angle, val in zip(angles[:-1], values):
+        ax.plot(angle, val, "o", color=C_YELLOW, markersize=7,
+                markeredgecolor=C_BLUE, markeredgewidth=1.2)
+        ax.annotate(
+            f"{val:.2f}",
+            xy=(angle, val),
+            xytext=(angle, val + 0.35),
+            ha="center", va="center",
+            fontsize=7.5, color=C_BLUE, fontweight="bold",
         )
-        label_svg += f'<text text-anchor="{anchor}" font-size="11" fill="{color_label}" font-family="Inter,sans-serif">{tspans}</text>\n'
 
-    # Level numbers on first axis
-    level_labels = ""
-    ax0 = angles[0]
-    for level in range(1, LEVELS + 1):
-        lx, ly = pt(MAX_VAL * level / LEVELS, ax0)
-        level_labels += f'<text x="{lx+6:.1f}" y="{ly:.1f}" font-size="9" fill="#4A5068">{level}</text>\n'
+    plt.tight_layout(pad=1.5)
 
-    return f"""<svg viewBox="0 0 {W_total} {H_total}" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:440px;display:block;margin:auto">
-  {rings_svg}
-  {axes_svg}
-  {data_svg}
-  {dots_svg}
-  {score_labels}
-  {label_svg}
-  {level_labels}
-</svg>"""
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", dpi=150, bbox_inches="tight",
+                facecolor="white", edgecolor="none")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
 
 
 # ─── INTERFAZ STREAMLIT ────────────────────────────────────────────────────
@@ -753,23 +829,72 @@ if plantilla_bytes is None:
 
 
 
-st.markdown('<div class="card"><div class="card-label">📂 Archivos</div>', unsafe_allow_html=True)
+# ── Cargar base de datos de evaluaciones (embebida en el repo) ──
+_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "evaluaciones.xlsx")
 
-archivo_excel = st.file_uploader(
-    "Archivo Excel de evaluaciones",
-    type=["xlsx", "xls"],
-    help="El archivo exportado del sistema de evaluación docente"
+@st.cache_data(show_spinner=False)
+def _cargar_db() -> bytes:
+    if os.path.isfile(_DB_PATH):
+        with open(_DB_PATH, "rb") as f:
+            return f.read()
+    return None
+
+_db_bytes = _cargar_db()
+
+if _db_bytes is None:
+    st.error("⚠️ No se encontró **evaluaciones.xlsx** en el repositorio.")
+    st.stop()
+
+# ── Entrada: Catálogo y Nº Clase ──
+st.markdown('<div class="card"><div class="card-label">🔍 Buscar clase</div>', unsafe_allow_html=True)
+
+input_codigo = st.text_input(
+    "Catálogo – Nº de clase",
+    placeholder="Ej: OG2117-5890",
+    help="Ingresa el código del catálogo seguido de un guion y el número de clase (ej: OG2117-5890)"
 )
 
+buscar = st.button("🔎 Buscar y previsualizar")
 st.markdown('</div>', unsafe_allow_html=True)
 
-# ── Preview automático al subir Excel ──
-profesores = {}
-if archivo_excel:
-    try:
-        with st.spinner("Leyendo Excel y procesando comentarios…"):
-            profesores = leer_excel(archivo_excel.getvalue())
+# ── Estado de sesión para profesores encontrados ──
+if "profesores" not in st.session_state:
+    st.session_state.profesores = {}
 
+profesores = st.session_state.profesores
+
+if buscar:
+    codigo = input_codigo.strip()
+    if not codigo or "-" not in codigo:
+        st.warning("Ingresa el código en el formato **CATÁLOGO-CLASE**, por ejemplo: `OG2117-5890`.")
+    else:
+        # Separar por el último guion para admitir catálogos con letras+números
+        partes = codigo.rsplit("-", 1)
+        if len(partes) != 2 or not partes[0].strip() or not partes[1].strip():
+            st.warning("Formato inválido. Usa **CATÁLOGO-CLASE**, por ejemplo: `OG2117-5890`.")
+        else:
+            input_catalogo = partes[0].strip()
+            input_clase    = partes[1].strip()
+            try:
+                with st.spinner("Buscando en la base de datos…"):
+                    resultado = leer_excel(
+                        _db_bytes,
+                        filtro_catalogo=input_catalogo,
+                        filtro_clase=input_clase
+                    )
+                if not resultado:
+                    st.error(f"No se encontraron registros para **{input_catalogo.upper()}-{input_clase}**. "
+                             "Verifica el catálogo y número de clase.")
+                    st.session_state.profesores = {}
+                else:
+                    st.session_state.profesores = resultado
+                    profesores = resultado
+            except Exception as e:
+                st.error(f"Error al leer la base de datos: {e}")
+
+# ── Preview de resultados ──
+if profesores:
+    try:
         st.markdown('<div class="card"><div class="card-label">👥 Profesores encontrados</div>',
                     unsafe_allow_html=True)
 
@@ -799,36 +924,10 @@ if archivo_excel:
         """, unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
-        # ── Diagrama de araña por competencias ──
-        if len(profesores) == 1:
-            nombre_unico, datos_unicos = next(iter(profesores.items()))
-            notas_comp = datos_unicos.get("notas_competencias", {})
-            if notas_comp and len(notas_comp) >= 3:
-                st.markdown('<div class="card"><div class="card-label">🕸️ Competencias evaluadas</div>',
-                            unsafe_allow_html=True)
-                svg = _spider_chart_svg(notas_comp)
-                if svg:
-                    st.markdown(svg, unsafe_allow_html=True)
-                st.markdown('</div>', unsafe_allow_html=True)
-        else:
-            # Múltiples profesores: mostrar araña por cada uno en expander
-            any_comp = any(d.get("notas_competencias") for d in profesores.values())
-            if any_comp:
-                st.markdown('<div class="card"><div class="card-label">🕸️ Competencias evaluadas</div>',
-                            unsafe_allow_html=True)
-                for nombre, datos in profesores.items():
-                    notas_comp = datos.get("notas_competencias", {})
-                    if notas_comp and len(notas_comp) >= 3:
-                        with st.expander(nombre.title()):
-                            svg = _spider_chart_svg(notas_comp)
-                            if svg:
-                                st.markdown(svg, unsafe_allow_html=True)
-                st.markdown('</div>', unsafe_allow_html=True)
-
     except Exception as e:
-        st.error(f"No se pudo leer el Excel: {e}")
+        st.error(f"Error al mostrar resultados: {e}")
 
-# ── Sección 2: Generar ──
+# ── Sección: Generar informes ──
 if profesores:
     st.markdown('<div class="card"><div class="card-label">⚙️ Generar informes</div>',
                 unsafe_allow_html=True)
@@ -850,7 +949,7 @@ if profesores:
 
     if st.button(f"Generar {'informe' if es_uno else str(total) + ' informes'}"):
         errores = []
-        archivos_generados = {}  # nombre → bytes
+        archivos_generados = {}
 
         barra = st.progress(0, text="Generando informes…")
         for i, (nombre, datos) in enumerate(profesores.items()):
@@ -882,7 +981,6 @@ if profesores:
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 )
             else:
-                # Empaquetar todos en un ZIP
                 zip_buf = io.BytesIO()
                 with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
                     for nombre_arch, docx_bytes in archivos_generados.items():
@@ -896,5 +994,47 @@ if profesores:
                     mime="application/zip",
                 )
 
-elif not archivo_excel:
-    st.info("📊 Sube el **archivo Excel** para comenzar.")
+elif buscar and not profesores:
+    pass  # El error ya se mostró arriba
+else:
+    st.info("🔍 Ingresa el código en formato **CATÁLOGO-CLASE** (ej: `OG2117-5890`) para comenzar.")
+
+# ── Sección: Actualizar base de datos (al final) ──
+st.markdown("---")
+with st.expander("🔄 Actualizar base de datos de evaluación docente"):
+    st.markdown(
+        "<small style='color:#4A5068'>Usa esta opción para reemplazar el Excel de evaluaciones "
+        "cuando haya datos de un nuevo semestre. El archivo reemplazará <code>evaluaciones.xlsx</code> "
+        "en el servidor mientras la app esté corriendo. Para que el cambio sea permanente, "
+        "sube también el nuevo archivo al repositorio en GitHub.</small>",
+        unsafe_allow_html=True
+    )
+    nuevo_excel = st.file_uploader(
+        "Nuevo archivo de evaluaciones (.xlsx)",
+        type=["xlsx"],
+        key="uploader_db"
+    )
+    if nuevo_excel:
+        if st.button("✅ Confirmar actualización de base de datos"):
+            try:
+                nuevos_bytes = nuevo_excel.getvalue()
+                # Validar que sea un Excel válido con la estructura esperada
+                wb_test = openpyxl.load_workbook(io.BytesIO(nuevos_bytes), read_only=True)
+                ws_test = wb_test.active
+                headers_test = {}
+                for row in ws_test.iter_rows(min_row=FILA_ENCABEZADO, max_row=FILA_ENCABEZADO, values_only=True):
+                    for i, val in enumerate(row):
+                        if val: headers_test[str(val).strip()] = i
+                    break
+                cols_requeridas = [COL_NOMBRE, COL_CATALOGO, COL_NCLASE, COL_COMPETENCIA, COL_NOTA_FINAL]
+                faltantes = [c for c in cols_requeridas if c not in headers_test]
+                if faltantes:
+                    st.error(f"El archivo no tiene las columnas requeridas: {', '.join(faltantes)}")
+                else:
+                    with open(_DB_PATH, "wb") as f:
+                        f.write(nuevos_bytes)
+                    st.cache_data.clear()
+                    st.success(f"✅ Base de datos actualizada correctamente ({len(nuevos_bytes)//1024} KB). "
+                               "Recarga la página para usar los nuevos datos.")
+            except Exception as e:
+                st.error(f"Error al actualizar: {e}")
