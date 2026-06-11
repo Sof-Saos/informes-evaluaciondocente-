@@ -41,24 +41,92 @@ ESCUELAS_EAFIT = {
 }
 
 FILTROS_COMENTARIOS = [
-    r"^\s*(no|na|n\.a\.?|n/a)\s*$",
-    r"^\s*(ninguno?|ninguna?|nada)\s*$",
-    r"^\s*(ok|oki|okay)\s*$",
-    r"^\s*(todo\s+(bien|esta\s+bien|está\s+bien))\s*$",
-    r"^\s*(bien|excelente)\s*$",
-    r"^\s*(gracias?)\s*$",
-    r"^\s*(no\s+aplica|no\s+apply|n\.?a\.?)\s*$",
-    r"^\s*(cumple|cumplido)\s*$",
-    r"^\s*s[ií]n?\s+comentarios?\s*$",
-    r"^\s*(si|sí)\s*$",
-    r"^\s*(nunguno?|nung[uo]no?)\s*$",
-    r"^\s*-\s*$",
+    # Respuestas vacías o sin contenido
     r"^\s*$",
+    r"^\s*-+\s*$",
+    r"^\s*\.+\s*$",
+    # Afirmaciones/negaciones sin contenido
+    r"^\s*(no|na|n\.a\.?|n/a|nada|ninguno?|ninguna?)\s*$",
+    r"^\s*(nunguno?|nung[uo]no?)\s*$",
+    r"^\s*(si|sí|yes)\s*$",
+    r"^\s*(ok|oki|okay|okey)\s*$",
+    # Frases cortas irrelevantes
+    r"^\s*(todo\s+bien|todo\s+está?\s*bien|todo\s+esta\s*bien)\s*$",
+    r"^\s*(bien|muy\s+bien|excelente|perfecto)\s*$",
+    r"^\s*(gracias?|thanks?)\s*$",
+    r"^\s*(no\s+aplica|no\s+apply|n\.?a\.?)\s*$",
+    r"^\s*(cumple|cumplido|cumple\s+con\s+todo)\s*$",
+    r"^\s*s[ií]n?\s+comentarios?\s*$",
+    r"^\s*s[ií]n?\s+novedad(es)?\s*$",
+    r"^\s*(ningún?\s+comentario|no\s+tengo\s+comentarios?)\s*$",
+    r"^\s*(no\s+hay\s+comentarios?|sin\s+observaciones?)\s*$",
+    r"^\s*(ningun[ao])\s*$",
 ]
 
-MAYUSCULAS_FIJAS = {"eafit", "covid", "ia", "ti", "zoom", "teams", "meet"}
+MAYUSCULAS_FIJAS = {"eafit", "covid", "ia", "ti", "zoom", "teams", "meet", "canvas", "moodle"}
 
 W = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+
+# ─── LANGUAGETOOL ──────────────────────────────────────────────────────────
+
+import urllib.request
+import urllib.parse
+import json
+import time
+
+_LT_CACHE: dict = {}   # cache para no llamar la API dos veces con el mismo texto
+_LT_URL = "https://api.languagetool.org/v2/check"
+_LT_DISABLED = False   # se pone True si la API falla (fallback silencioso)
+
+def _languagetool_check(texto: str) -> list:
+    """Llama a la API pública de LanguageTool y devuelve la lista de matches."""
+    global _LT_DISABLED
+    if _LT_DISABLED:
+        return []
+    if texto in _LT_CACHE:
+        return _LT_CACHE[texto]
+    try:
+        data = urllib.parse.urlencode({
+            "language": "es",
+            "text": texto,
+            "enabledOnly": "false",
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            _LT_URL, data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded",
+                     "User-Agent": "EXA-InformeDocente/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+        matches = result.get("matches", [])
+        _LT_CACHE[texto] = matches
+        return matches
+    except Exception:
+        _LT_DISABLED = True   # si falla (sin internet, rate limit, etc.) no reintentar
+        return []
+
+def _aplicar_correcciones_lt(texto: str) -> str:
+    """Aplica las sugerencias de LanguageTool al texto (primera sugerencia por match)."""
+    matches = _languagetool_check(texto)
+    if not matches:
+        return texto
+    # Ordenar de atrás hacia adelante para no desplazar offsets
+    matches_sorted = sorted(matches, key=lambda m: m["offset"], reverse=True)
+    resultado = texto
+    for m in matches_sorted:
+        replacements = m.get("replacements", [])
+        if not replacements:
+            continue
+        # Solo aplicar correcciones de ortografía y tipografía, NO de estilo
+        rule_id = m.get("rule", {}).get("id", "")
+        issue_type = m.get("rule", {}).get("issueType", "")
+        if issue_type not in ("misspelling", "typographical"):
+            continue
+        mejor = replacements[0]["value"]
+        offset = m["offset"]
+        length = m["length"]
+        resultado = resultado[:offset] + mejor + resultado[offset + length:]
+    return resultado
 
 # ─── HELPERS ───────────────────────────────────────────────────────────────
 
@@ -72,31 +140,73 @@ def fmt_nota(n) -> str:
     except: return str(n)
 
 def es_valido(texto) -> bool:
+    """Filtra comentarios sin contenido útil."""
     if not texto: return False
     t = str(texto).strip()
     for p in FILTROS_COMENTARIOS:
         if re.match(p, t, re.IGNORECASE): return False
-    return len(t) >= 4
+    # Demasiado corto para ser útil
+    if len(t) < 5:
+        return False
+    return True
 
-def formatear_comentario(texto: str) -> str:
-    texto = str(texto).strip()
-    if not texto: return texto
+def _sentence_case(texto: str) -> str:
+    """
+    Convierte el texto a sentence case inteligente:
+    - Si todo (o casi todo) está en mayúsculas → convierte a minúsculas primero
+    - Primera letra de la oración en mayúscula
+    - Respeta siglas conocidas (EAFIT, COVID, etc.)
+    - Respeta palabras con mayúscula interna (iPad, etc.) — no las toca
+    """
+    if not texto:
+        return texto
+
+    # Detectar si el texto está "gritado" (>55% letras en mayúscula)
+    letras = [c for c in texto if c.isalpha()]
+    if letras and sum(1 for c in letras if c.isupper()) / len(letras) > 0.55:
+        texto = texto.lower()
+
+    # Procesar palabra por palabra
     palabras = texto.split()
     resultado = []
-    for palabra in palabras:
-        if len(palabra) > 1 and palabra.isupper() and palabra.isalpha():
+    for i, palabra in enumerate(palabras):
+        base = palabra.rstrip(".,;:!?()")
+        sufijo = palabra[len(base):]
+        base_lower = base.lower()
+
+        if base_lower in MAYUSCULAS_FIJAS:
+            resultado.append(base.upper() + sufijo)
+        elif len(base) > 1 and base.isupper():
+            # Sigla desconocida → dejar en mayúsculas
             resultado.append(palabra)
-        elif palabra.lower().rstrip(".,;:") in MAYUSCULAS_FIJAS:
-            resultado.append(palabra.upper())
         else:
-            resultado.append(palabra.lower())
+            resultado.append(base_lower + sufijo)
+
     if resultado:
-        primera = resultado[0]
-        resultado[0] = primera[0].upper() + primera[1:] if primera else primera
+        p = resultado[0]
+        resultado[0] = p[0].upper() + p[1:] if p else p
+
     texto_f = " ".join(resultado)
+
+    # Asegurar punto al final
     if texto_f and texto_f[-1] not in ".!?;:":
         texto_f += "."
+
     return texto_f
+
+def formatear_comentario(texto: str) -> str:
+    """Pipeline completo: sentence case → corrección ortográfica (LanguageTool)."""
+    texto = str(texto).strip()
+    if not texto:
+        return texto
+    # 1. Sentence case
+    texto = _sentence_case(texto)
+    # 2. Corrección ortográfica con LanguageTool (gratuito, sin API key)
+    texto = _aplicar_correcciones_lt(texto)
+    # 3. Asegurar que después de LT la primera letra sigue en mayúscula
+    if texto:
+        texto = texto[0].upper() + texto[1:]
+    return texto
 
 def slugify(texto: str) -> str:
     repl = {'á':'a','é':'e','í':'i','ó':'o','ú':'u','ü':'u','ñ':'n',
@@ -597,7 +707,33 @@ if plantilla_bytes is None:
              "Asegúrate de subir ese archivo a GitHub junto con `app.py`.")
     st.stop()
 
-# ── Sección 1: Archivos ──
+# ── Estado LanguageTool (se verifica una vez) ──
+@st.cache_data(ttl=300)
+def _verificar_lt() -> bool:
+    """Verifica si LanguageTool API está disponible. Cachea por 5 min."""
+    try:
+        data = urllib.parse.urlencode({"language": "es", "text": "prueba"}).encode("utf-8")
+        req = urllib.request.Request(
+            _LT_URL, data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded",
+                     "User-Agent": "EXA-InformeDocente/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=5):
+            pass
+        return True
+    except Exception:
+        return False
+
+_lt_disponible = _verificar_lt()
+_estado_lt = (
+    '<span style="color:#16A34A;font-size:0.75rem">● Corrección ortográfica activa</span>'
+    if _lt_disponible else
+    '<span style="color:#4A5068;font-size:0.75rem">○ Corrección ortográfica no disponible</span>'
+)
+st.markdown(f'<div style="text-align:right;margin-top:-1.2rem;margin-bottom:1rem">{_estado_lt}</div>',
+            unsafe_allow_html=True)
+
+
 st.markdown('<div class="card"><div class="card-label">📂 Archivos</div>', unsafe_allow_html=True)
 
 archivo_excel = st.file_uploader(
@@ -612,7 +748,7 @@ st.markdown('</div>', unsafe_allow_html=True)
 profesores = {}
 if archivo_excel:
     try:
-        with st.spinner("Leyendo Excel…"):
+        with st.spinner("Leyendo Excel y procesando comentarios…"):
             profesores = leer_excel(archivo_excel.getvalue())
 
         st.markdown('<div class="card"><div class="card-label">👥 Profesores encontrados</div>',
