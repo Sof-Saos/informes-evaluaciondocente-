@@ -1,15 +1,15 @@
-# 📋 Generador de Informes de Evaluación Docente 
+# 📋 Generador de Informes de Evaluación Docente
 
-Herramienta web para generar automáticamente informes individuales de evaluación docente a partir de los archivos Excel exportados del sistema institucional.
+Herramienta web para generar automáticamente informes individuales de evaluación docente a partir de los resultados del sistema institucional.
 
 ---
 
 ## ¿Qué hace?
 
-El sistema toma el archivo Excel con los resultados de la evaluación docente y genera un informe Word (`.docx`) personalizado por cada profesor, con:
+El sistema busca los resultados de un curso por su código de catálogo y número de clase, y genera un informe Word (`.docx`) personalizado por cada profesor, con:
 
 - **Portada** con nombre del profesor, curso, escuela y semestre
-- **Tabla de competencias** con las notas del curso
+- **Diagrama de araña** con las notas por competencia (escala 0–5)
 - **Tabla de estudiantes** con el número de evaluaciones generadas y realizadas
 - **Comentarios** organizados por sección (aspectos positivos, aspectos a mejorar y comentarios adicionales), filtrados y formateados automáticamente
 
@@ -18,38 +18,57 @@ El sistema toma el archivo Excel con los resultados de la evaluación docente y 
 ## Cómo usar la aplicación web
 
 1. Entra a la URL de la app
-2. Sube el **archivo Excel** de evaluación docente
-3. Sube la **Plantilla Word** (archivo `Plantilla.docx`)
-4. La app muestra una vista previa con los profesores encontrados
+2. Ingresa el **código de catálogo y número de clase** en el formato `CATÁLOGO-CLASE` (ej. `OG2117-5890`)
+3. La app muestra una vista previa con los profesores encontrados
+4. Sube la **Plantilla Word** (`Plantilla.docx`) si no está cargada aún
 5. Haz clic en **Generar informes**
 6. Descarga el `.docx` (un profesor) o el `.zip` (varios profesores)
+
+> La base de datos de evaluaciones ya viene incluida en la app — no es necesario subir ningún Excel para generar informes.
 
 ---
 
 ## Estructura del repositorio
 
 ```
-├── app.py              # Aplicación web (Streamlit)
-├── requirements.txt    # Dependencias de Python
-├── Plantilla.docx      # Plantilla base para los informes
+├── app.py               # Aplicación web (Streamlit)
+├── requirements.txt     # Dependencias de Python
+├── evaluaciones.xlsx    # Base de datos de evaluaciones docentes
+├── Plantilla.docx       # Plantilla base para los informes
 └── README.md
 ```
 
 ---
 
-## Formato del Excel esperado
+## Actualizar la base de datos
 
-El archivo Excel debe tener los encabezados en la **fila 7** y los datos desde la **fila 8**. Las columnas que usa el sistema son:
+Cuando haya datos de un nuevo semestre, ve al expander **"Actualizar base de datos de evaluación docente"** al final de la app, sube el nuevo Excel y confirma. El archivo se sube directamente al repositorio en GitHub mediante un commit automático — el cambio es permanente y la app se actualiza en segundos.
+
+Para que esto funcione, el secreto `GITHUB_TOKEN` debe estar configurado en Streamlit Cloud (*Settings → Secrets*):
+
+```toml
+GITHUB_TOKEN = "ghp_tuTokenAquí"
+```
+
+El token debe tener permisos de **Contents: Read and write** sobre el repositorio.
+
+---
+
+## Formato del Excel de evaluaciones
+
+El archivo debe tener los encabezados en la **fila 7** y los datos desde la **fila 8**. Las columnas que usa el sistema son:
 
 | Columna | Descripción |
 |---|---|
 | `Nombres y apellidos Docente` | Nombre completo del profesor |
 | `Ciclo` | Semestre (ej. `2661`) |
+| `Catálogo` | Código del catálogo (ej. `OG2117`) |
+| `Nº Clase` | Número de clase (ej. `5890`) |
 | `Nombre Catalogo` | Nombre del curso |
 | `Id Escuela` | Código de escuela (ej. `E-ADM`) |
 | `Escuela` | Nombre abreviado (fallback si el código no está mapeado) |
 | `Competencia Evaluada` | Nombre de la competencia |
-| `Nota final por clase` | Nota por sesión |
+| `Nota competencia por clase` | Nota de la competencia por sesión |
 | `Nota final por curso` | Nota consolidada del curso |
 | `Pregunta` | Pregunta de la encuesta |
 | `Comentarios` | Respuesta abierta del estudiante |
@@ -109,3 +128,5 @@ Cuando se genera un solo informe, el nombre es editable desde la interfaz antes 
 - [Streamlit](https://streamlit.io/) — interfaz web
 - [openpyxl](https://openpyxl.readthedocs.io/) — lectura de archivos Excel
 - [lxml](https://lxml.de/) — manipulación del XML interno de los archivos Word
+- [matplotlib](https://matplotlib.org/) — generación del diagrama de araña en el informe
+- [numpy](https://numpy.org/) — cálculos para el diagrama de araña
