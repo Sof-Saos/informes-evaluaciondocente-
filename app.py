@@ -1000,41 +1000,104 @@ else:
     st.info("🔍 Ingresa el código en formato **CATÁLOGO-CLASE** (ej: `OG2117-5890`) para comenzar.")
 
 # ── Sección: Actualizar base de datos (al final) ──
+import base64
+import urllib.request
+import urllib.error
+import json as _json
+
+_GH_REPO  = "Sof-Saos/informes-evaluaciondocente-"   # usuario/repo
+_GH_FILE  = "evaluaciones.xlsx"                        # ruta dentro del repo
+_GH_TOKEN = st.secrets.get("GITHUB_TOKEN", "")        # secreto en Streamlit Cloud
+
+def _gh_get_sha(token: str) -> str | None:
+    """Obtiene el SHA actual del archivo en GitHub (necesario para actualizarlo)."""
+    url = f"https://api.github.com/repos/{_GH_REPO}/contents/{_GH_FILE}"
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return _json.loads(r.read())["sha"]
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None   # archivo no existe todavía
+        raise
+
+def _gh_push_file(token: str, content_bytes: bytes, sha: str | None, mensaje: str) -> bool:
+    """Sube (o reemplaza) el archivo en GitHub mediante un commit."""
+    url = f"https://api.github.com/repos/{_GH_REPO}/contents/{_GH_FILE}"
+    payload = {
+        "message": mensaje,
+        "content": base64.b64encode(content_bytes).decode(),
+        "branch": "main",
+    }
+    if sha:
+        payload["sha"] = sha
+    data = _json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, method="PUT", headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    })
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.status in (200, 201)
+
 st.markdown("---")
 with st.expander("🔄 Actualizar base de datos de evaluación docente"):
-    st.markdown(
-        "<small style='color:#4A5068'>Usa esta opción para reemplazar el Excel de evaluaciones "
-        "cuando haya datos de un nuevo semestre. El archivo reemplazará <code>evaluaciones.xlsx</code> "
-        "en el servidor mientras la app esté corriendo. Para que el cambio sea permanente, "
-        "sube también el nuevo archivo al repositorio en GitHub.</small>",
-        unsafe_allow_html=True
-    )
-    nuevo_excel = st.file_uploader(
-        "Nuevo archivo de evaluaciones (.xlsx)",
-        type=["xlsx"],
-        key="uploader_db"
-    )
-    if nuevo_excel:
-        if st.button("✅ Confirmar actualización de base de datos"):
-            try:
-                nuevos_bytes = nuevo_excel.getvalue()
-                # Validar que sea un Excel válido con la estructura esperada
-                wb_test = openpyxl.load_workbook(io.BytesIO(nuevos_bytes), read_only=True)
-                ws_test = wb_test.active
-                headers_test = {}
-                for row in ws_test.iter_rows(min_row=FILA_ENCABEZADO, max_row=FILA_ENCABEZADO, values_only=True):
-                    for i, val in enumerate(row):
-                        if val: headers_test[str(val).strip()] = i
-                    break
-                cols_requeridas = [COL_NOMBRE, COL_CATALOGO, COL_NCLASE, COL_COMPETENCIA, COL_NOTA_FINAL]
-                faltantes = [c for c in cols_requeridas if c not in headers_test]
-                if faltantes:
-                    st.error(f"El archivo no tiene las columnas requeridas: {', '.join(faltantes)}")
-                else:
-                    with open(_DB_PATH, "wb") as f:
-                        f.write(nuevos_bytes)
-                    st.cache_data.clear()
-                    st.success(f"✅ Base de datos actualizada correctamente ({len(nuevos_bytes)//1024} KB). "
-                               "Recarga la página para usar los nuevos datos.")
-            except Exception as e:
-                st.error(f"Error al actualizar: {e}")
+    if not _GH_TOKEN:
+        st.warning(
+            "⚠️ No se encontró el secreto **GITHUB_TOKEN** en Streamlit Cloud. "
+            "Agrégalo en *Settings → Secrets* para habilitar la actualización permanente."
+        )
+    else:
+        st.markdown(
+            "<small style='color:#4A5068'>Sube el Excel del nuevo semestre. "
+            "El archivo se guardará directamente en GitHub — el cambio es <b>permanente</b> "
+            "y la app se actualizará automáticamente en unos segundos.</small>",
+            unsafe_allow_html=True
+        )
+        nuevo_excel = st.file_uploader(
+            "Nuevo archivo de evaluaciones (.xlsx)",
+            type=["xlsx"],
+            key="uploader_db"
+        )
+        if nuevo_excel:
+            if st.button("✅ Confirmar actualización de base de datos"):
+                try:
+                    nuevos_bytes = nuevo_excel.getvalue()
+
+                    # 1. Validar estructura del Excel
+                    wb_test = openpyxl.load_workbook(io.BytesIO(nuevos_bytes), read_only=True)
+                    ws_test = wb_test.active
+                    headers_test = {}
+                    for row in ws_test.iter_rows(min_row=FILA_ENCABEZADO, max_row=FILA_ENCABEZADO, values_only=True):
+                        for i, val in enumerate(row):
+                            if val: headers_test[str(val).strip()] = i
+                        break
+                    cols_requeridas = [COL_NOMBRE, COL_CATALOGO, COL_NCLASE, COL_COMPETENCIA, COL_NOTA_FINAL]
+                    faltantes = [c for c in cols_requeridas if c not in headers_test]
+                    if faltantes:
+                        st.error(f"El archivo no tiene las columnas requeridas: {', '.join(faltantes)}")
+                    else:
+                        # 2. Subir a GitHub
+                        with st.spinner("Subiendo a GitHub…"):
+                            sha_actual = _gh_get_sha(_GH_TOKEN)
+                            ciclo_val  = ws_test.cell(row=1, column=2).value or ""
+                            commit_msg = f"Actualizar evaluaciones.xlsx — ciclo {ciclo_val} ({len(nuevos_bytes)//1024} KB)"
+                            ok = _gh_push_file(_GH_TOKEN, nuevos_bytes, sha_actual, commit_msg)
+                        if ok:
+                            st.cache_data.clear()
+                            st.success(
+                                f"✅ Base de datos actualizada en GitHub ({len(nuevos_bytes)//1024} KB). "
+                                "Streamlit Cloud redeployará la app en unos segundos con los datos nuevos."
+                            )
+                        else:
+                            st.error("No se pudo subir el archivo a GitHub. Verifica el token y los permisos.")
+                except urllib.error.HTTPError as e:
+                    body = e.read().decode(errors="replace")
+                    st.error(f"Error de GitHub ({e.code}): {body}")
+                except Exception as e:
+                    st.error(f"Error al actualizar: {e}")
