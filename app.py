@@ -22,9 +22,9 @@ COL_ID_ESCUELA      = "Id Escuela"
 COL_ESCUELA         = "Escuela"
 COL_COMPETENCIA     = "Competencia Evaluada"
 COL_NOTA_FINAL      = "Nota competencia por clase"
+COL_NOTA_FINAL_CLASE = "Nota final por clase"
 COL_NOTA_CURSO      = "Nota final por curso"
 COL_PREGUNTA        = "Pregunta"
-COL_CALIF_PREGUNTA  = "Calificación Pregunta"
 COL_COMENTARIO      = "Comentarios"
 COL_TOTAL_GENERADAS = "Total Evaluaciones generadas"
 COL_EVALUACIONES    = "Evaluaciones realizadas"
@@ -253,13 +253,9 @@ def leer_excel(archivo_bytes: bytes = None,
         comp      = str(col(row, COL_COMPETENCIA) or "").strip()
         pregunta  = str(col(row, COL_PREGUNTA) or "").strip()
         nota_final= col(row, COL_NOTA_FINAL)
+        nota_final_clase = col(row, COL_NOTA_FINAL_CLASE)
         nota_curso= col(row, COL_NOTA_CURSO)
         comentario= col(row, COL_COMENTARIO)
-        calif_preg_raw = col(row, COL_CALIF_PREGUNTA)
-        try:
-            calif_preg = float(calif_preg_raw) if calif_preg_raw not in (None, "") else None
-        except (ValueError, TypeError):
-            calif_preg = None
 
         total_gen = col(row, COL_TOTAL_GENERADAS)
         eval_real = col(row, COL_EVALUACIONES)
@@ -275,32 +271,18 @@ def leer_excel(archivo_bytes: bytes = None,
         if nota_curso and nota_curso > 0 and p["nota_curso"] is None:
             p["nota_curso"] = nota_curso
 
-        if comp and comp != "Comentarios" and nota_final and nota_final > 0:
+        # Puntaje de la competencia para el diagrama de araña:
+        # algunas competencias (Índice de recomendación, Pacto Pedagógico, Calidad,
+        # Comportamiento del grupo) vienen en 0 en "Nota competencia por clase" pero
+        # sí traen el valor real en "Nota final por clase" → se usa como fallback.
+        nota_para_grafico = nota_final if (nota_final and nota_final > 0) else nota_final_clase
+        if comp and comp != "Comentarios" and nota_para_grafico and nota_para_grafico > 0:
             if comp not in p["notas_competencias"]:
-                p["notas_competencias"][comp] = nota_final
+                p["notas_competencias"][comp] = nota_para_grafico
 
         if comp == "Comentarios" and pregunta and comentario:
             if es_valido(str(comentario)):
                 p["comentarios"][pregunta].append(formatear_comentario(str(comentario)))
-
-        # ── Índice de recomendación y pacto pedagógico ──
-        # Estas preguntas viven en filas de tipo "Comentarios" (su nota NO está
-        # en COL_NOTA_FINAL, que viene vacío/0 ahí), sino en "Calificación Pregunta".
-        # Tienen puntaje numérico propio (escala 0-5) y se incluyen en el
-        # diagrama de araña como ejes adicionales.
-        PREG_INDICE   = ("índice de recomendación", "indice de recomendacion",
-                         "recomendaría", "recomendaria", "recomendación del docente",
-                         "recomendacion del docente")
-        PREG_PACTO    = ("pacto pedagógico", "pacto pedagogico",
-                         "acuerdo pedagógico", "acuerdo pedagogico")
-        preg_lower = pregunta.lower()
-        if calif_preg and calif_preg > 0:
-            if any(k in preg_lower for k in PREG_INDICE):
-                if "Índice de recomendación" not in p["notas_competencias"]:
-                    p["notas_competencias"]["Índice de recomendación"] = calif_preg
-            elif any(k in preg_lower for k in PREG_PACTO):
-                if "Pacto pedagógico" not in p["notas_competencias"]:
-                    p["notas_competencias"]["Pacto pedagógico"] = calif_preg
 
     return dict(profesores)
 
@@ -339,7 +321,21 @@ def generar_informe_bytes(nombre: str, datos: dict,
 
     # ── Tabla / gráfico competencias ──
     tbl_comp = body_children[3]
-    notas_comp = datos.get("notas_competencias", {})
+    notas_comp_raw = datos.get("notas_competencias", {})
+
+    # Orden fijo de competencias en el diagrama de araña
+    ORDEN_COMPETENCIAS = [
+        "Relacional (Calidad Humana)",
+        "Pedagógica",
+        "Relacional (Respeto)",
+        "Índice de recomendación",
+        "Pacto Pedagógico",
+    ]
+    notas_comp = {k: notas_comp_raw[k] for k in ORDEN_COMPETENCIAS if k in notas_comp_raw}
+    # Agregar al final cualquier otra competencia no contemplada en el orden fijo
+    for k, v in notas_comp_raw.items():
+        if k not in notas_comp:
+            notas_comp[k] = v
 
     if notas_comp and len(notas_comp) >= 3:
         # Generar PNG del diagrama de araña e insertarlo como imagen en el docx
