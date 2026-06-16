@@ -192,12 +192,27 @@ def leer_excel(archivo_bytes: bytes = None,
                filtro_clase: str = None,
                archivo_path: str = None) -> dict:
     """
-    Lee el Excel de evaluaciones docentes.
-    Acepta bytes en memoria O ruta en disco (más eficiente para archivos grandes).
-    Si se pasan filtro_catalogo y filtro_clase, solo procesa las filas que coincidan.
+    Lee el Excel de evaluaciones docentes y filtra por catálogo/clase.
+    Usa _cargar_filas_excel (cacheada) para no releer todo el archivo en cada búsqueda.
+    """
+    filas_por_clave, headers = _cargar_filas_excel(archivo_path, archivo_bytes)
+
+    f_cat   = str(filtro_catalogo).strip().upper() if filtro_catalogo else None
+    f_clase = str(filtro_clase).strip() if filtro_clase else None
+    clave   = (f_cat or "", f_clase or "")
+
+    filas = filas_por_clave.get(clave, [])
+    return _procesar_filas(filas, headers)
+
+
+@st.cache_data(show_spinner=False)
+def _cargar_filas_excel(archivo_path: str = None, archivo_bytes: bytes = None):
+    """
+    Lee el Excel UNA sola vez y agrupa las filas por (catálogo, nº clase).
+    Resultado cacheado: las búsquedas siguientes son instantáneas (no se vuelve a leer el Excel).
+    El caché se invalida automáticamente si cambia el archivo (por su contenido/ruta+mtime).
     """
     if archivo_path:
-        # Leer directamente desde disco — mucho más eficiente con archivos grandes
         wb = openpyxl.load_workbook(archivo_path, read_only=True)
     else:
         wb = openpyxl.load_workbook(io.BytesIO(archivo_bytes), read_only=True)
@@ -209,13 +224,27 @@ def leer_excel(archivo_bytes: bytes = None,
             if val: headers[str(val).strip()] = i
         break
 
+    idx_cat   = headers.get(COL_CATALOGO)
+    idx_clase = headers.get(COL_NCLASE)
+    idx_nombre = headers.get(COL_NOMBRE)
+
+    filas_por_clave = defaultdict(list)
+    for row in ws.iter_rows(min_row=FILA_DATOS, values_only=True):
+        if idx_nombre is None or idx_nombre >= len(row) or not row[idx_nombre]:
+            continue
+        cat_row   = str(row[idx_cat] if idx_cat is not None and idx_cat < len(row) else "").strip().upper()
+        clase_row = str(row[idx_clase] if idx_clase is not None and idx_clase < len(row) else "").strip()
+        filas_por_clave[(cat_row, clase_row)].append(row)
+
+    wb.close()
+    return dict(filas_por_clave), headers
+
+
+def _procesar_filas(rows, headers) -> dict:
+    """Construye el diccionario de profesores a partir de las filas ya filtradas."""
     def col(row_data, nombre):
         idx = headers.get(nombre)
         return row_data[idx] if idx is not None and idx < len(row_data) else None
-
-    # Normalizar filtros
-    f_cat   = str(filtro_catalogo).strip().upper() if filtro_catalogo else None
-    f_clase = str(filtro_clase).strip() if filtro_clase else None
 
     profesores = defaultdict(lambda: {
         "info": {}, "nota_final": None, "nota_curso": None,
@@ -224,19 +253,9 @@ def leer_excel(archivo_bytes: bytes = None,
         "notas_competencias": {},
     })
 
-    for row in ws.iter_rows(min_row=FILA_DATOS, values_only=True):
+    for row in rows:
         nombre = col(row, COL_NOMBRE)
         if not nombre: continue
-
-        # Aplicar filtro si se indicó
-        if f_cat or f_clase:
-            cat_row   = str(col(row, COL_CATALOGO) or "").strip().upper()
-            clase_row = str(col(row, COL_NCLASE) or "").strip()
-            if f_cat and cat_row != f_cat:
-                continue
-            if f_clase and clase_row != f_clase:
-                continue
-
         nombre = str(nombre).strip()
         p = profesores[nombre]
 
@@ -323,7 +342,7 @@ def generar_informe_bytes(nombre: str, datos: dict,
     tbl_comp = body_children[3]
     notas_comp_raw = datos.get("notas_competencias", {})
 
-    # Orden fijo de competencias en el diagrama de araña
+    # Orden fijo de competencias en el diagrama de araña (solo estas 5, ninguna más)
     ORDEN_COMPETENCIAS = [
         "Relacional (Calidad Humana)",
         "Pedagógica",
@@ -332,10 +351,6 @@ def generar_informe_bytes(nombre: str, datos: dict,
         "Pacto Pedagógico",
     ]
     notas_comp = {k: notas_comp_raw[k] for k in ORDEN_COMPETENCIAS if k in notas_comp_raw}
-    # Agregar al final cualquier otra competencia no contemplada en el orden fijo
-    for k, v in notas_comp_raw.items():
-        if k not in notas_comp:
-            notas_comp[k] = v
 
     if notas_comp and len(notas_comp) >= 3:
         # Generar PNG del diagrama de araña e insertarlo como imagen en el docx
