@@ -24,6 +24,7 @@ COL_COMPETENCIA     = "Competencia Evaluada"
 COL_NOTA_FINAL      = "Nota competencia por clase"
 COL_NOTA_CURSO      = "Nota final por curso"
 COL_PREGUNTA        = "Pregunta"
+COL_CALIF_PREGUNTA  = "Calificación Pregunta"
 COL_COMENTARIO      = "Comentarios"
 COL_TOTAL_GENERADAS = "Total Evaluaciones generadas"
 COL_EVALUACIONES    = "Evaluaciones realizadas"
@@ -254,6 +255,11 @@ def leer_excel(archivo_bytes: bytes = None,
         nota_final= col(row, COL_NOTA_FINAL)
         nota_curso= col(row, COL_NOTA_CURSO)
         comentario= col(row, COL_COMENTARIO)
+        calif_preg_raw = col(row, COL_CALIF_PREGUNTA)
+        try:
+            calif_preg = float(calif_preg_raw) if calif_preg_raw not in (None, "") else None
+        except (ValueError, TypeError):
+            calif_preg = None
 
         total_gen = col(row, COL_TOTAL_GENERADAS)
         eval_real = col(row, COL_EVALUACIONES)
@@ -278,21 +284,23 @@ def leer_excel(archivo_bytes: bytes = None,
                 p["comentarios"][pregunta].append(formatear_comentario(str(comentario)))
 
         # ── Índice de recomendación y pacto pedagógico ──
-        # Estas preguntas tienen puntaje numérico propio (escala 0-5) y
-        # se incluyen en el diagrama de araña como ejes adicionales.
+        # Estas preguntas viven en filas de tipo "Comentarios" (su nota NO está
+        # en COL_NOTA_FINAL, que viene vacío/0 ahí), sino en "Calificación Pregunta".
+        # Tienen puntaje numérico propio (escala 0-5) y se incluyen en el
+        # diagrama de araña como ejes adicionales.
         PREG_INDICE   = ("índice de recomendación", "indice de recomendacion",
                          "recomendaría", "recomendaria", "recomendación del docente",
                          "recomendacion del docente")
         PREG_PACTO    = ("pacto pedagógico", "pacto pedagogico",
                          "acuerdo pedagógico", "acuerdo pedagogico")
         preg_lower = pregunta.lower()
-        if nota_final and nota_final > 0:
+        if calif_preg and calif_preg > 0:
             if any(k in preg_lower for k in PREG_INDICE):
                 if "Índice de recomendación" not in p["notas_competencias"]:
-                    p["notas_competencias"]["Índice de recomendación"] = nota_final
+                    p["notas_competencias"]["Índice de recomendación"] = calif_preg
             elif any(k in preg_lower for k in PREG_PACTO):
                 if "Pacto pedagógico" not in p["notas_competencias"]:
-                    p["notas_competencias"]["Pacto pedagógico"] = nota_final
+                    p["notas_competencias"]["Pacto pedagógico"] = calif_preg
 
     return dict(profesores)
 
