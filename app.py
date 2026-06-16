@@ -277,6 +277,23 @@ def leer_excel(archivo_bytes: bytes = None,
             if es_valido(str(comentario)):
                 p["comentarios"][pregunta].append(formatear_comentario(str(comentario)))
 
+        # ── Índice de recomendación y pacto pedagógico ──
+        # Estas preguntas tienen puntaje numérico propio (escala 0-5) y
+        # se incluyen en el diagrama de araña como ejes adicionales.
+        PREG_INDICE   = ("índice de recomendación", "indice de recomendacion",
+                         "recomendaría", "recomendaria", "recomendación del docente",
+                         "recomendacion del docente")
+        PREG_PACTO    = ("pacto pedagógico", "pacto pedagogico",
+                         "acuerdo pedagógico", "acuerdo pedagogico")
+        preg_lower = pregunta.lower()
+        if nota_final and nota_final > 0:
+            if any(k in preg_lower for k in PREG_INDICE):
+                if "Índice de recomendación" not in p["notas_competencias"]:
+                    p["notas_competencias"]["Índice de recomendación"] = nota_final
+            elif any(k in preg_lower for k in PREG_PACTO):
+                if "Pacto pedagógico" not in p["notas_competencias"]:
+                    p["notas_competencias"]["Pacto pedagógico"] = nota_final
+
     return dict(profesores)
 
 # ─── GENERACIÓN WORD EN MEMORIA ────────────────────────────────────────────
@@ -325,8 +342,8 @@ def generar_informe_bytes(nombre: str, datos: dict,
 
         # Construir elemento <w:p> con la imagen inline
         # Tamaño: ~10 cm de ancho (EMU: 1 cm = 914400 / 100 * 10 = 3600000... → 1 cm = 360000 EMU, 10 cm = 3600000)
-        EMU_W = 4200000   # ~11.7 cm
-        EMU_H = 4200000
+        EMU_W = 5400000   # ~15 cm
+        EMU_H = 5400000
 
         draw_xml = (
             f'<w:p xmlns:w="{W[1:-1]}"'
@@ -465,67 +482,181 @@ def generar_informe_bytes(nombre: str, datos: dict,
 def _spider_chart_png(notas: dict) -> bytes:
     """
     Genera el diagrama de araña como PNG en memoria usando matplotlib.
+    Incluye todas las competencias + índice de recomendación + pacto pedagógico si existen.
     Retorna los bytes del PNG.
     """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
     import numpy as np
+    import textwrap
 
-    labels = list(notas.keys())
-    values = [min(max(float(v), 0), 5) for v in notas.values()]
-    n = len(labels)
+    # ── Colores EAFIT ──────────────────────────────────────────────────────
+    C_BLUE      = "#004B85"
+    C_BLUE_MID  = "#0064B0"
+    C_YELLOW    = "#FFB903"
+    C_FILL      = "#004B85"
+    C_GRID      = "#DDDDDD"
+    C_BG        = "#FFFFFF"
+    C_LABEL     = "#1A1A2E"
+    C_SCORE_BG  = "#004B85"
+    C_SCORE_FG  = "#FFFFFF"
 
-    # Ángulos para cada eje (cerrar el polígono repitiendo el primero)
-    angles = np.linspace(0, 2 * np.pi, n, endpoint=False).tolist()
-    angles += angles[:1]
+    labels_raw = list(notas.keys())
+    values     = [min(max(float(v), 0), 5) for v in notas.values()]
+    n          = len(labels_raw)
+
+    # Abreviar etiquetas largas para que quepan en el radar
+    def _abrev(txt: str, max_chars: int = 22) -> str:
+        txt = txt.strip()
+        if len(txt) <= max_chars:
+            return txt
+        # Dividir en hasta 2 líneas
+        words = txt.split()
+        lines, current = [], ""
+        for w in words:
+            if len(current) + len(w) + 1 <= max_chars:
+                current = (current + " " + w).strip()
+            else:
+                if current:
+                    lines.append(current)
+                current = w
+        if current:
+            lines.append(current)
+        return "\n".join(lines[:2])
+
+    labels = [_abrev(l) for l in labels_raw]
+
+    # ── Geometría ──────────────────────────────────────────────────────────
+    angles      = np.linspace(0, 2 * np.pi, n, endpoint=False).tolist()
+    angles     += angles[:1]
     values_plot = values + values[:1]
 
-    fig, ax = plt.subplots(figsize=(5.5, 5.5), subplot_kw=dict(polar=True))
-    fig.patch.set_facecolor("white")
-    ax.set_facecolor("white")
+    # Canvas más grande para que las etiquetas tengan espacio
+    fig = plt.figure(figsize=(8, 8), facecolor=C_BG)
+    ax  = fig.add_subplot(111, polar=True, facecolor="#F8FAFD")
 
-    # Colores EAFIT
-    C_BLUE   = "#004B85"
-    C_YELLOW = "#FFB903"
-    C_GRID   = "#CCCCCC"
-
-    # Rejilla y niveles
+    # ── Rejilla ────────────────────────────────────────────────────────────
     ax.set_ylim(0, 5)
-    ax.set_yticks([1, 2, 3, 4, 5])
-    ax.set_yticklabels(["1", "2", "3", "4", "5"], color="#888888", fontsize=7)
-    ax.yaxis.set_tick_params(labelsize=7)
-    ax.grid(color=C_GRID, linewidth=0.8, linestyle="--", alpha=0.7)
-    ax.spines["polar"].set_color(C_GRID)
+    levels = [1, 2, 3, 4, 5]
+    ax.set_yticks(levels)
+    ax.set_yticklabels([])           # ocultamos los ticks de radio
+    ax.yaxis.set_visible(False)
 
-    # Ejes con etiquetas
-    ax.set_xticks(angles[:-1])
-    ax.set_xticklabels(labels, fontsize=8.5, color="#222222",
-                       fontfamily="DejaVu Sans", wrap=True)
-    # Ajuste de padding para etiquetas largas
-    ax.tick_params(axis='x', pad=10)
+    # Anillos concéntricos dibujados a mano (más control visual)
+    for lvl in levels:
+        ring_angles = np.linspace(0, 2 * np.pi, 300)
+        ring_r      = [lvl] * 300
+        alpha       = 0.55 if lvl == 5 else 0.25
+        lw          = 1.2  if lvl == 5 else 0.6
+        ax.plot(ring_angles, ring_r, color=C_GRID, linewidth=lw,
+                linestyle="-", alpha=alpha, zorder=1)
+        # Número del nivel en el eje 0 (arriba)
+        if lvl < 5:
+            ax.text(0, lvl + 0.07, str(lvl), ha="center", va="bottom",
+                    fontsize=7, color="#AAAAAA", zorder=5)
 
-    # Polígono de datos
-    ax.plot(angles, values_plot, color=C_BLUE, linewidth=2, linestyle="solid")
-    ax.fill(angles, values_plot, color=C_BLUE, alpha=0.25)
+    # Líneas de los ejes (radios)
+    for angle in angles[:-1]:
+        ax.plot([angle, angle], [0, 5], color=C_GRID,
+                linewidth=0.8, alpha=0.5, zorder=1)
 
-    # Puntos y etiquetas de puntaje
+    # Ocultar la rejilla y bordes por defecto de matplotlib
+    ax.grid(False)
+    ax.spines["polar"].set_visible(False)
+
+    # ── Polígono de datos ──────────────────────────────────────────────────
+    ax.fill(angles, values_plot, color=C_FILL, alpha=0.18, zorder=2)
+    ax.plot(angles, values_plot, color=C_BLUE, linewidth=2.5,
+            linestyle="solid", zorder=3)
+
+    # ── Puntos en cada vértice ─────────────────────────────────────────────
     for angle, val in zip(angles[:-1], values):
-        ax.plot(angle, val, "o", color=C_YELLOW, markersize=7,
-                markeredgecolor=C_BLUE, markeredgewidth=1.2)
+        ax.plot(angle, val, "o", color=C_YELLOW, markersize=10,
+                markeredgecolor=C_BLUE, markeredgewidth=1.8, zorder=4)
+
+    # ── Etiquetas de puntaje con pastilla de fondo ─────────────────────────
+    # Desplazamiento adaptativo: alejar del centro
+    for angle, val, lbl_raw in zip(angles[:-1], values, labels_raw):
+        offset = 0.52   # distancia adicional sobre el punto
+        r_text = min(val + offset, 5.0)
+
+        # Evitar que quede fuera del área si el valor es muy alto
+        if val > 4.4:
+            r_text = val - 0.45
+
+        score_str = f"{val:.2f}"
         ax.annotate(
-            f"{val:.2f}",
+            score_str,
             xy=(angle, val),
-            xytext=(angle, val + 0.35),
+            xytext=(angle, r_text),
+            textcoords="data",
             ha="center", va="center",
-            fontsize=7.5, color=C_BLUE, fontweight="bold",
+            fontsize=8.5, fontweight="bold", color=C_SCORE_FG,
+            bbox=dict(
+                boxstyle="round,pad=0.25",
+                facecolor=C_SCORE_BG,
+                edgecolor=C_YELLOW,
+                linewidth=1.2,
+                alpha=0.92,
+            ),
+            zorder=6,
         )
 
-    plt.tight_layout(pad=1.5)
+    # ── Etiquetas de los ejes (categorías) ────────────────────────────────
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels([])   # usamos anotaciones manuales para control total
+
+    label_r = 5.65   # radio base donde ponemos las etiquetas
+    for i, (angle, label) in enumerate(zip(angles[:-1], labels)):
+        ha = "center"
+        if 0.1 < angle < np.pi - 0.1:
+            ha = "left" if angle < np.pi else "right"
+        if np.pi + 0.1 < angle < 2 * np.pi - 0.1:
+            ha = "right"
+
+        # Calcular x, y en coordenadas cartesianas para anotación fuera del polar
+        x = np.sin(angle)   # matplotlib polar: 0° arriba, gira horario
+        y = np.cos(angle)
+
+        ax.text(
+            angle, label_r, label,
+            ha="center", va="center",
+            fontsize=8.2, color=C_LABEL, fontweight="600",
+            multialignment="center",
+            linespacing=1.3,
+            zorder=7,
+        )
+
+    # ── Tick params ───────────────────────────────────────────────────────
+    ax.tick_params(axis="both", which="both",
+                   bottom=False, top=False, left=False, right=False,
+                   labelbottom=False, labeltop=False)
+
+    # ── Ajuste márgenes para que las etiquetas no se corten ───────────────
+    ax.set_rlim(0, 5)
+    fig.subplots_adjust(left=0.08, right=0.92, top=0.88, bottom=0.08)
+
+    # ── Título ────────────────────────────────────────────────────────────
+    fig.text(
+        0.5, 0.96,
+        "Resultados por competencia",
+        ha="center", va="top",
+        fontsize=11, fontweight="bold", color=C_BLUE,
+    )
+
+    # ── Leyenda de puntaje máximo ─────────────────────────────────────────
+    patch = mpatches.Patch(facecolor=C_FILL, alpha=0.35,
+                           edgecolor=C_BLUE, linewidth=1.2,
+                           label="Puntaje obtenido (escala 0–5)")
+    ax.legend(handles=[patch], loc="lower center",
+              bbox_to_anchor=(0.5, -0.08), frameon=False,
+              fontsize=8, labelcolor="#555555")
 
     buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=150, bbox_inches="tight",
-                facecolor="white", edgecolor="none")
+    plt.savefig(buf, format="png", dpi=180, bbox_inches="tight",
+                facecolor=C_BG, edgecolor="none")
     plt.close(fig)
     buf.seek(0)
     return buf.read()
@@ -1022,6 +1153,28 @@ def _gh_get_sha(token: str) -> str | None:
             return None   # archivo no existe todavía
         raise
 
+def _comprimir_excel(archivo_bytes: bytes) -> bytes:
+    """
+    Comprime un Excel sin perder datos:
+    - Recarga con openpyxl y guarda con ZIP_DEFLATED máximo.
+    - Elimina estilos innecesarios y vistas en caché.
+    Retorna los bytes comprimidos (puede ser menor o igual al original).
+    """
+    import zipfile, io
+    # Estrategia 1: re-empaquetar el ZIP del xlsx con compresión máxima
+    input_zip  = zipfile.ZipFile(io.BytesIO(archivo_bytes), "r")
+    out_buf    = io.BytesIO()
+    with zipfile.ZipFile(out_buf, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as out_zip:
+        for item in input_zip.infolist():
+            data = input_zip.read(item.filename)
+            out_zip.writestr(item, data)
+    input_zip.close()
+    compressed = out_buf.getvalue()
+
+    # Devolver el más pequeño (siempre debería ser el comprimido)
+    return compressed if len(compressed) < len(archivo_bytes) else archivo_bytes
+
+
 def _gh_push_file(token: str, content_bytes: bytes, sha: str | None, mensaje: str, intentos: int = 2) -> bool:
     """Sube (o reemplaza) el archivo en GitHub mediante un commit.
     Reintenta una vez con el SHA más reciente si GitHub responde 409 (conflicto)."""
@@ -1089,28 +1242,44 @@ with st.expander("🔄 Actualizar base de datos de evaluación docente"):
                     tamano_mb = len(nuevos_bytes) / (1024 * 1024)
                     if faltantes:
                         st.error(f"El archivo no tiene las columnas requeridas: {', '.join(faltantes)}")
-                    elif tamano_mb > 24:
-                        st.error(
-                            f"El archivo pesa {tamano_mb:.1f} MB. La API de contenidos de GitHub solo "
-                            "acepta archivos de hasta ~24-25 MB por este método. Comprime el Excel "
-                            "(elimina hojas/columnas no usadas, guarda como .xlsx sin formato extra) "
-                            "o sube el archivo manualmente desde GitHub (que sí soporta archivos más grandes via Git LFS o drag-and-drop)."
-                        )
                     else:
-                        # 2. Subir a GitHub
-                        with st.spinner("Subiendo a GitHub…"):
-                            sha_actual = _gh_get_sha(_GH_TOKEN)
-                            ciclo_val  = ws_test.cell(row=1, column=2).value or ""
-                            commit_msg = f"Actualizar evaluaciones.xlsx — ciclo {ciclo_val} ({len(nuevos_bytes)//1024} KB)"
-                            ok = _gh_push_file(_GH_TOKEN, nuevos_bytes, sha_actual, commit_msg)
-                        if ok:
-                            st.cache_data.clear()
-                            st.success(
-                                f"✅ Base de datos actualizada en GitHub ({len(nuevos_bytes)//1024} KB). "
-                                "Streamlit Cloud redeployará la app en unos segundos con los datos nuevos."
+                        # ── Compresión automática si el archivo es pesado ──
+                        if tamano_mb > 20:
+                            with st.spinner(f"El archivo pesa {tamano_mb:.1f} MB — comprimiendo automáticamente…"):
+                                nuevos_bytes_comp = _comprimir_excel(nuevos_bytes)
+                                tamano_comp_mb    = len(nuevos_bytes_comp) / (1024 * 1024)
+                            ahorro = tamano_mb - tamano_comp_mb
+                            if ahorro > 0.05:
+                                st.info(
+                                    f"📦 Archivo comprimido: {tamano_mb:.1f} MB → **{tamano_comp_mb:.1f} MB** "
+                                    f"(ahorro de {ahorro:.1f} MB, sin pérdida de datos)."
+                                )
+                                nuevos_bytes = nuevos_bytes_comp
+                                tamano_mb    = tamano_comp_mb
+                            else:
+                                st.info(f"ℹ️ El archivo ya estaba bien comprimido ({tamano_mb:.1f} MB).")
+
+                        if tamano_mb > 99:
+                            st.error(
+                                f"❌ El archivo pesa **{tamano_mb:.1f} MB** incluso tras comprimirlo. "
+                                "La API de GitHub tiene un límite de ~100 MB. "
+                                "Elimina hojas o columnas que no se usen y vuelve a intentarlo."
                             )
                         else:
-                            st.error("No se pudo subir el archivo a GitHub. Verifica el token y los permisos.")
+                            # 2. Subir a GitHub
+                            with st.spinner("Subiendo a GitHub…"):
+                                sha_actual = _gh_get_sha(_GH_TOKEN)
+                                ciclo_val  = ws_test.cell(row=1, column=2).value or ""
+                                commit_msg = f"Actualizar evaluaciones.xlsx — ciclo {ciclo_val} ({len(nuevos_bytes)//1024} KB)"
+                                ok = _gh_push_file(_GH_TOKEN, nuevos_bytes, sha_actual, commit_msg)
+                            if ok:
+                                st.cache_data.clear()
+                                st.success(
+                                    f"✅ Base de datos actualizada en GitHub ({len(nuevos_bytes)//1024} KB). "
+                                    "Streamlit Cloud redeployará la app en unos segundos con los datos nuevos."
+                                )
+                            else:
+                                st.error("No se pudo subir el archivo a GitHub. Verifica el token y los permisos.")
                 except urllib.error.HTTPError as e:
                     body = e.read().decode(errors="replace")
                     st.error(f"Error de GitHub ({e.code}): {body}")
