@@ -186,15 +186,20 @@ def clone_bullet_para(template_para):
 COL_CATALOGO = "Catálogo"
 COL_NCLASE   = "Nº Clase"
 
-def leer_excel(archivo_bytes: bytes,
+def leer_excel(archivo_bytes: bytes = None,
                filtro_catalogo: str = None,
-               filtro_clase: str = None) -> dict:
+               filtro_clase: str = None,
+               archivo_path: str = None) -> dict:
     """
     Lee el Excel de evaluaciones docentes.
-    Si se pasan filtro_catalogo y filtro_clase, solo procesa las filas
-    que coincidan con esa combinación (mucho más rápido).
+    Acepta bytes en memoria O ruta en disco (más eficiente para archivos grandes).
+    Si se pasan filtro_catalogo y filtro_clase, solo procesa las filas que coincidan.
     """
-    wb = openpyxl.load_workbook(io.BytesIO(archivo_bytes), read_only=True)
+    if archivo_path:
+        # Leer directamente desde disco — mucho más eficiente con archivos grandes
+        wb = openpyxl.load_workbook(archivo_path, read_only=True)
+    else:
+        wb = openpyxl.load_workbook(io.BytesIO(archivo_bytes), read_only=True)
     ws = wb.active
 
     headers = {}
@@ -829,20 +834,12 @@ if plantilla_bytes is None:
 
 
 
-# ── Cargar base de datos de evaluaciones (embebida en el repo) ──
+# ── Base de datos de evaluaciones (en disco, no se carga en RAM) ──
 _DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "evaluaciones.xlsx")
 
-@st.cache_data(show_spinner=False)
-def _cargar_db() -> bytes:
-    if os.path.isfile(_DB_PATH):
-        with open(_DB_PATH, "rb") as f:
-            return f.read()
-    return None
-
-_db_bytes = _cargar_db()
-
-if _db_bytes is None:
-    st.error("⚠️ No se encontró **evaluaciones.xlsx** en el repositorio.")
+if not os.path.isfile(_DB_PATH):
+    st.error("⚠️ No se encontró **evaluaciones.xlsx** en el repositorio. "
+             "Asegúrate de subirlo a GitHub junto con `app.py`.")
     st.stop()
 
 # ── Entrada: Catálogo y Nº Clase ──
@@ -878,7 +875,7 @@ if buscar:
             try:
                 with st.spinner("Buscando en la base de datos…"):
                     resultado = leer_excel(
-                        _db_bytes,
+                        archivo_path=_DB_PATH,
                         filtro_catalogo=input_catalogo,
                         filtro_clase=input_clase
                     )
@@ -1025,25 +1022,35 @@ def _gh_get_sha(token: str) -> str | None:
             return None   # archivo no existe todavía
         raise
 
-def _gh_push_file(token: str, content_bytes: bytes, sha: str | None, mensaje: str) -> bool:
-    """Sube (o reemplaza) el archivo en GitHub mediante un commit."""
+def _gh_push_file(token: str, content_bytes: bytes, sha: str | None, mensaje: str, intentos: int = 2) -> bool:
+    """Sube (o reemplaza) el archivo en GitHub mediante un commit.
+    Reintenta una vez con el SHA más reciente si GitHub responde 409 (conflicto)."""
     url = f"https://api.github.com/repos/{_GH_REPO}/contents/{_GH_FILE}"
-    payload = {
-        "message": mensaje,
-        "content": base64.b64encode(content_bytes).decode(),
-        "branch": "main",
-    }
-    if sha:
-        payload["sha"] = sha
-    data = _json.dumps(payload).encode()
-    req = urllib.request.Request(url, data=data, method="PUT", headers={
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "Content-Type": "application/json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    })
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return r.status in (200, 201)
+    for intento in range(intentos):
+        payload = {
+            "message": mensaje,
+            "content": base64.b64encode(content_bytes).decode(),
+            "branch": "main",
+        }
+        if sha:
+            payload["sha"] = sha
+        data = _json.dumps(payload).encode()
+        req = urllib.request.Request(url, data=data, method="PUT", headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return r.status in (200, 201)
+        except urllib.error.HTTPError as e:
+            if e.code == 409 and intento < intentos - 1:
+                # Conflicto: el SHA quedó desactualizado, volvemos a consultarlo y reintentamos
+                sha = _gh_get_sha(token)
+                continue
+            raise
+    return False
 
 st.markdown("---")
 with st.expander("🔄 Actualizar base de datos de evaluación docente"):
@@ -1079,8 +1086,16 @@ with st.expander("🔄 Actualizar base de datos de evaluación docente"):
                         break
                     cols_requeridas = [COL_NOMBRE, COL_CATALOGO, COL_NCLASE, COL_COMPETENCIA, COL_NOTA_FINAL]
                     faltantes = [c for c in cols_requeridas if c not in headers_test]
+                    tamano_mb = len(nuevos_bytes) / (1024 * 1024)
                     if faltantes:
                         st.error(f"El archivo no tiene las columnas requeridas: {', '.join(faltantes)}")
+                    elif tamano_mb > 24:
+                        st.error(
+                            f"El archivo pesa {tamano_mb:.1f} MB. La API de contenidos de GitHub solo "
+                            "acepta archivos de hasta ~24-25 MB por este método. Comprime el Excel "
+                            "(elimina hojas/columnas no usadas, guarda como .xlsx sin formato extra) "
+                            "o sube el archivo manualmente desde GitHub (que sí soporta archivos más grandes via Git LFS o drag-and-drop)."
+                        )
                     else:
                         # 2. Subir a GitHub
                         with st.spinner("Subiendo a GitHub…"):
