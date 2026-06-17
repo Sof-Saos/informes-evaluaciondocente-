@@ -5,6 +5,9 @@ Versión web (Streamlit)
 
 import io, os, re, zipfile, random, tempfile
 import math
+import json as _json
+import urllib.request as _urlreq
+import urllib.error as _urlerr
 from collections import defaultdict
 from copy import deepcopy
 from lxml import etree
@@ -681,6 +684,250 @@ def _spider_chart_png(notas: dict) -> bytes:
     return buf.read()
 
 
+# ─── MÓDULO: ALISTAMIENTO DE CONSIDERACIONES (IA) ─────────────────────────
+#
+# Este módulo toma un informe .docx YA GENERADO por la app y, usando uno o
+# varios documentos guía (formaciones EXA, protocolos, lineamientos, etc.)
+# como contexto, reescribe ÚNICAMENTE la sección "Consideraciones" del
+# informe usando GitHub Models (API gratuita, modelo gpt-4o-mini).
+#
+# El resto del informe (portada, diagrama de competencias, comentarios,
+# aspectos formativos, firma) no se toca en absoluto.
+
+GITHUB_MODELS_URL   = "https://models.github.ai/inference/chat/completions"
+GITHUB_MODELS_MODEL = "openai/gpt-4o-mini"
+MAX_CHARS_CONTEXTO  = 24000   # ~6000-8000 tokens aprox., margen para el tier "Low"
+
+def extraer_texto_referencia(nombre_archivo: str, contenido: bytes) -> str:
+    """Extrae texto plano de un archivo de referencia (.pdf, .docx, .txt)."""
+    ext = nombre_archivo.lower().rsplit(".", 1)[-1] if "." in nombre_archivo else ""
+    try:
+        if ext == "txt":
+            return contenido.decode("utf-8", errors="ignore")
+
+        elif ext == "docx":
+            import docx as _docx_lib
+            doc = _docx_lib.Document(io.BytesIO(contenido))
+            partes = [p.text for p in doc.paragraphs if p.text.strip()]
+            for tabla in doc.tables:
+                for fila in tabla.rows:
+                    for celda in fila.cells:
+                        if celda.text.strip():
+                            partes.append(celda.text.strip())
+            return "\n".join(partes)
+
+        elif ext == "pdf":
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(contenido))
+            partes = []
+            for pagina in reader.pages:
+                texto = pagina.extract_text() or ""
+                if texto.strip():
+                    partes.append(texto)
+            return "\n".join(partes)
+
+        else:
+            return ""
+    except Exception:
+        return ""
+
+
+def extraer_texto_informe_actual(docx_bytes: bytes) -> dict:
+    """
+    Extrae del informe .docx ya generado: nombre del profesor, curso, escuela,
+    comentarios por sección, y el contenido actual de Consideraciones (si lo hay).
+    Esto le da contexto al modelo sobre QUÉ profesor/curso es y qué se dijo de él.
+    """
+    tree = etree.fromstring(
+        zipfile.ZipFile(io.BytesIO(docx_bytes)).read('word/document.xml')
+    )
+    body = tree.find(W + 'body')
+    children = list(body)
+
+    def texto_de(elem):
+        return "".join(t.text or "" for t in elem.iter(W + 't')).strip()
+
+    textos = [texto_de(c) for c in children]
+    texto_completo = "\n".join(t for t in textos if t)
+
+    # Portada: primer párrafo trae curso/escuela/semestre/nombre concatenados
+    portada = textos[0] if textos else ""
+
+    # Comentarios: todo lo que está entre las preguntas conocidas y "Consideraciones"
+    idx_consideraciones = next((i for i, t in enumerate(textos) if t.strip().rstrip("\xa0 ") == "Consideraciones"), None)
+    comentarios_texto = []
+    capturando = False
+    for t in textos:
+        if t.startswith("Menciona un aspecto") or t.startswith("¿Tienes algún comentario"):
+            capturando = True
+            comentarios_texto.append(f"\n— {t} —")
+            continue
+        if t.strip().rstrip("\xa0 ") == "Consideraciones":
+            break
+        if capturando and t:
+            comentarios_texto.append(t)
+
+    return {
+        "portada": portada,
+        "comentarios": "\n".join(comentarios_texto),
+        "tiene_consideraciones_idx": idx_consideraciones is not None,
+    }
+
+
+def llamar_github_models(token: str, prompt_sistema: str, prompt_usuario: str,
+                          max_tokens: int = 900, temperature: float = 0.4) -> str:
+    """
+    Llama a GitHub Models (chat completions) y devuelve el texto de la respuesta.
+    Lanza una excepción con mensaje claro si falla (token inválido, rate limit, etc.)
+    """
+    payload = {
+        "model": GITHUB_MODELS_MODEL,
+        "messages": [
+            {"role": "system", "content": prompt_sistema},
+            {"role": "user", "content": prompt_usuario},
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    data = _json.dumps(payload).encode("utf-8")
+    req = _urlreq.Request(GITHUB_MODELS_URL, data=data, method="POST", headers={
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/vnd.github+json",
+    })
+    try:
+        with _urlreq.urlopen(req, timeout=60) as r:
+            resultado = _json.loads(r.read())
+        return resultado["choices"][0]["message"]["content"].strip()
+    except _urlerr.HTTPError as e:
+        cuerpo = e.read().decode(errors="replace")
+        if e.code == 401:
+            raise RuntimeError("Token de GitHub Models inválido o sin el permiso 'models: read'.") from e
+        elif e.code == 429:
+            raise RuntimeError("Se alcanzó el límite de solicitudes del tier gratuito (15/min o 150/día). "
+                               "Espera un momento e inténtalo de nuevo.") from e
+        else:
+            raise RuntimeError(f"Error de GitHub Models ({e.code}): {cuerpo[:300]}") from e
+
+
+def generar_consideraciones_ia(token: str, info_informe: dict, contexto_docs: str,
+                                instruccion_usuaria: str = "") -> str:
+    """Construye los prompts y pide al modelo la sección de Consideraciones reescrita."""
+    prompt_sistema = (
+        "Eres un asistente experto en evaluación docente y formación pedagógica universitaria. "
+        "Tu única tarea es redactar la sección 'Consideraciones' de un informe individual de "
+        "evaluación docente, en español, con tono profesional, constructivo y respetuoso. "
+        "Debes basarte en la estructura, criterios, tono y lenguaje de los documentos de "
+        "referencia institucionales que se te proporcionan (formaciones EXA, protocolos, "
+        "lineamientos). No inventes datos, cifras o citas que no estén en el contexto. "
+        "No incluyas encabezados ni títulos (el título 'Consideraciones' ya existe en el "
+        "documento), entrega solo el cuerpo del texto, en párrafos claros y bien estructurados. "
+        "No uses viñetas a menos que el documento de referencia lo sugiera explícitamente."
+    )
+
+    partes_usuario = [
+        f"INFORMACIÓN DEL CURSO Y PROFESOR (portada del informe):\n{info_informe['portada']}\n",
+        f"COMENTARIOS DE ESTUDIANTES RECOPILADOS EN LA EVALUACIÓN:\n{info_informe['comentarios'] or '(sin comentarios registrados)'}\n",
+    ]
+    if contexto_docs:
+        partes_usuario.append(f"DOCUMENTOS DE REFERENCIA INSTITUCIONALES (usar como guía de estructura, tono y criterios):\n{contexto_docs}\n")
+    if instruccion_usuaria.strip():
+        partes_usuario.append(f"INDICACIÓN ADICIONAL DE QUIEN ELABORA EL INFORME:\n{instruccion_usuaria.strip()}\n")
+
+    partes_usuario.append(
+        "Con base en lo anterior, redacta la sección 'Consideraciones' del informe: una síntesis "
+        "constructiva del desempeño docente, con observaciones y recomendaciones claras y "
+        "accionables, alineada con los documentos de referencia. Extensión sugerida: 2 a 4 párrafos."
+    )
+
+    prompt_usuario = "\n".join(partes_usuario)
+
+    # Recortar el contexto si excede el límite del tier gratuito
+    if len(prompt_usuario) > MAX_CHARS_CONTEXTO:
+        prompt_usuario = prompt_usuario[:MAX_CHARS_CONTEXTO] + "\n[...contexto recortado por límite de tokens...]"
+
+    return llamar_github_models(token, prompt_sistema, prompt_usuario)
+
+
+def insertar_consideraciones_en_docx(docx_bytes: bytes, texto_consideraciones: str) -> bytes:
+    """
+    Localiza el título 'Consideraciones' en el documento (por texto, no por índice
+    fijo, ya que el índice varía según cuántos comentarios tenga cada informe) y
+    reemplaza los párrafos vacíos que le siguen con el texto generado, separado
+    en párrafos. No modifica ninguna otra parte del documento.
+    """
+    tree = etree.fromstring(
+        zipfile.ZipFile(io.BytesIO(docx_bytes)).read('word/document.xml')
+    )
+    body = tree.find(W + 'body')
+    children = list(body)
+
+    def texto_de(elem):
+        return "".join(t.text or "" for t in elem.iter(W + 't')).strip().rstrip("\xa0 ")
+
+    idx_titulo = next((i for i, c in enumerate(children) if texto_de(c) == "Consideraciones"), None)
+    if idx_titulo is None:
+        raise RuntimeError("No se encontró la sección 'Consideraciones' en este informe. "
+                           "Verifica que el archivo subido sea un informe generado por esta app.")
+
+    # Buscar el siguiente párrafo con texto real (ej. "Aspectos formativos") para
+    # saber hasta dónde van los párrafos vacíos que se pueden usar/reemplazar.
+    idx_siguiente_con_texto = None
+    for j in range(idx_titulo + 1, len(children)):
+        if texto_de(children[j]):
+            idx_siguiente_con_texto = j
+            break
+    if idx_siguiente_con_texto is None:
+        idx_siguiente_con_texto = len(children)
+
+    # Párrafos vacíos disponibles entre el título y el siguiente contenido
+    huecos = children[idx_titulo + 1: idx_siguiente_con_texto]
+    if not huecos:
+        # No hay párrafos vacíos de plantilla; se crea uno nuevo como referencia de estilo
+        template_para = children[idx_titulo]
+    else:
+        template_para = huecos[0]
+
+    insert_pos = list(body).index(huecos[0]) if huecos else list(body).index(children[idx_titulo]) + 1
+
+    # Quitar los huecos vacíos existentes
+    for h in huecos:
+        body.remove(h)
+
+    # Insertar un párrafo por cada bloque de texto (separado por saltos de línea dobles)
+    parrafos_nuevos = [p.strip() for p in re.split(r"\n\s*\n", texto_consideraciones) if p.strip()]
+    if not parrafos_nuevos:
+        parrafos_nuevos = [texto_consideraciones.strip()]
+
+    for k, parrafo in enumerate(parrafos_nuevos):
+        nuevo_p = clone_bullet_para(template_para) if huecos else deepcopy(template_para)
+        # Limpiar estilo de viñeta/lista si el template_para tuviera uno (no aplica aquí,
+        # pero por seguridad se elimina cualquier numPr heredado)
+        for numPr in nuevo_p.findall('.//' + W + 'numPr'):
+            numPr.getparent().remove(numPr)
+        all_ts = list(nuevo_p.iter(W + 't'))
+        if all_ts:
+            all_ts[0].text = parrafo
+            all_ts[0].set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+            for t in all_ts[1:]:
+                t.text = ''
+        else:
+            r = etree.SubElement(nuevo_p, W + 'r')
+            t = etree.SubElement(r, W + 't')
+            t.text = parrafo
+            t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+        body.insert(insert_pos + k, nuevo_p)
+
+    new_xml = etree.tostring(tree, xml_declaration=True, encoding='UTF-8', standalone=True)
+    out_buf = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(docx_bytes), 'r') as zin:
+        with zipfile.ZipFile(out_buf, 'w', zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                zout.writestr(item, new_xml if item.filename == 'word/document.xml'
+                              else zin.read(item.filename))
+    return out_buf.getvalue()
+
+
 # ─── INTERFAZ STREAMLIT ────────────────────────────────────────────────────
 
 st.set_page_config(
@@ -982,6 +1229,27 @@ if plantilla_bytes is None:
              "Asegúrate de subir ese archivo a GitHub junto con `app.py`.")
     st.stop()
 
+# ── Menú de navegación (sidebar / menú hamburguesa) ──
+if "pagina_actual" not in st.session_state:
+    st.session_state.pagina_actual = "generar"
+
+with st.sidebar:
+    st.markdown(
+        '<div style="font-size:0.75rem;color:#4A5068;text-transform:uppercase;'
+        'letter-spacing:0.05em;margin-bottom:0.8rem">Navegación</div>',
+        unsafe_allow_html=True
+    )
+    if st.button("📋  Generar informe", use_container_width=True,
+                 type=("primary" if st.session_state.pagina_actual == "generar" else "secondary")):
+        st.session_state.pagina_actual = "generar"
+        st.rerun()
+    if st.button("✨  Alistamiento de Consideraciones", use_container_width=True,
+                 type=("primary" if st.session_state.pagina_actual == "consideraciones" else "secondary")):
+        st.session_state.pagina_actual = "consideraciones"
+        st.rerun()
+
+PAGINA = st.session_state.pagina_actual
+
 
 
 # ── Base de datos de evaluaciones (en disco, no se carga en RAM) ──
@@ -993,158 +1261,163 @@ if not os.path.isfile(_DB_PATH):
     st.stop()
 
 # ── Entrada: Catálogo y Nº Clase ──
-st.markdown('<div class="card"><div class="card-label">🔍 Buscar clase</div>', unsafe_allow_html=True)
+if PAGINA == "generar":
+    st.markdown('<div class="card"><div class="card-label">🔍 Buscar clase</div>', unsafe_allow_html=True)
 
-input_codigo = st.text_input(
-    "Catálogo – Nº de clase",
-    placeholder="Ej: OG2117-5890",
-    help="Ingresa el código del catálogo seguido de un guion y el número de clase (ej: OG2117-5890)"
-)
+    input_codigo = st.text_input(
+        "Catálogo – Nº de clase",
+        placeholder="Ej: OG2117-5890",
+        help="Ingresa el código del catálogo seguido de un guion y el número de clase (ej: OG2117-5890)"
+    )
 
-buscar = st.button("🔎 Buscar y previsualizar")
-st.markdown('</div>', unsafe_allow_html=True)
-
-# ── Estado de sesión para profesores encontrados ──
-if "profesores" not in st.session_state:
-    st.session_state.profesores = {}
-
-profesores = st.session_state.profesores
-
-if buscar:
-    codigo = input_codigo.strip()
-    if not codigo or "-" not in codigo:
-        st.warning("Ingresa el código en el formato **CATÁLOGO-CLASE**, por ejemplo: `OG2117-5890`.")
-    else:
-        # Separar por el último guion para admitir catálogos con letras+números
-        partes = codigo.rsplit("-", 1)
-        if len(partes) != 2 or not partes[0].strip() or not partes[1].strip():
-            st.warning("Formato inválido. Usa **CATÁLOGO-CLASE**, por ejemplo: `OG2117-5890`.")
-        else:
-            input_catalogo = partes[0].strip()
-            input_clase    = partes[1].strip()
-            try:
-                with st.spinner("Buscando en la base de datos…"):
-                    resultado = leer_excel(
-                        archivo_path=_DB_PATH,
-                        filtro_catalogo=input_catalogo,
-                        filtro_clase=input_clase
-                    )
-                if not resultado:
-                    st.error(f"No se encontraron registros para **{input_catalogo.upper()}-{input_clase}**. "
-                             "Verifica el catálogo y número de clase.")
-                    st.session_state.profesores = {}
-                else:
-                    st.session_state.profesores = resultado
-                    profesores = resultado
-            except Exception as e:
-                st.error(f"Error al leer la base de datos: {e}")
-
-# ── Preview de resultados ──
-if profesores:
-    try:
-        st.markdown('<div class="card"><div class="card-label">👥 Profesores encontrados</div>',
-                    unsafe_allow_html=True)
-
-        filas_html = ""
-        for nombre, datos in profesores.items():
-            info = datos["info"]
-            nf   = nombre_archivo_defecto(datos, nombre)
-            filas_html += f"""
-            <tr>
-              <td class="name-cell">{nombre.title()}</td>
-              <td>{info.get('curso','—')}</td>
-              <td>{info.get('escuela','—')}</td>
-              <td><span class="badge-ciclo">{info.get('ciclo','—')}</span></td>
-              <td class="file-cell">{nf}.docx</td>
-            </tr>"""
-
-        st.markdown(f"""
-        <table class="preview-table">
-          <thead>
-            <tr>
-              <th>Profesor</th><th>Curso</th><th>Escuela</th>
-              <th>Semestre</th><th>Nombre del archivo</th>
-            </tr>
-          </thead>
-          <tbody>{filas_html}</tbody>
-        </table>
-        """, unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    except Exception as e:
-        st.error(f"Error al mostrar resultados: {e}")
-
-# ── Sección: Generar informes ──
-if profesores:
-    st.markdown('<div class="card"><div class="card-label">⚙️ Generar informes</div>',
-                unsafe_allow_html=True)
-
-    total = len(profesores)
-    es_uno = total == 1
-
-    nombre_custom = None
-    if es_uno:
-        nombre_prof, datos_prof = next(iter(profesores.items()))
-        defecto = nombre_archivo_defecto(datos_prof, nombre_prof)
-        nombre_custom = st.text_input(
-            "Nombre del archivo (editable)",
-            value=defecto,
-            help="Puedes cambiar el nombre antes de generar"
-        )
-
+    buscar = st.button("🔎 Buscar y previsualizar")
     st.markdown('</div>', unsafe_allow_html=True)
 
-    if st.button(f"Generar {'informe' if es_uno else str(total) + ' informes'}"):
-        errores = []
-        archivos_generados = {}
+    # ── Estado de sesión para profesores encontrados ──
+    if "profesores" not in st.session_state:
+        st.session_state.profesores = {}
 
-        barra = st.progress(0, text="Generando informes…")
-        for i, (nombre, datos) in enumerate(profesores.items()):
-            try:
-                nf = nombre_custom if (es_uno and nombre_custom) else None
-                docx_bytes, nombre_arch = generar_informe_bytes(
-                    nombre, datos, plantilla_bytes, nombre_archivo=nf
-                )
-                archivos_generados[nombre_arch + ".docx"] = docx_bytes
-            except Exception as e:
-                errores.append(f"{nombre}: {e}")
-            barra.progress((i + 1) / total,
-                           text=f"Procesando {i+1} de {total}…")
+    profesores = st.session_state.profesores
 
-        barra.empty()
-
-        if errores:
-            for err in errores:
-                st.error(f"❌ {err}")
-
-        if archivos_generados:
-            if len(archivos_generados) == 1:
-                nombre_arch, docx_bytes = next(iter(archivos_generados.items()))
-                st.success(f"✅ Informe generado: **{nombre_arch}**")
-                st.download_button(
-                    label="⬇️  Descargar informe",
-                    data=docx_bytes,
-                    file_name=nombre_arch,
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                )
+    if buscar:
+        codigo = input_codigo.strip()
+        if not codigo or "-" not in codigo:
+            st.warning("Ingresa el código en el formato **CATÁLOGO-CLASE**, por ejemplo: `OG2117-5890`.")
+        else:
+            # Separar por el último guion para admitir catálogos con letras+números
+            partes = codigo.rsplit("-", 1)
+            if len(partes) != 2 or not partes[0].strip() or not partes[1].strip():
+                st.warning("Formato inválido. Usa **CATÁLOGO-CLASE**, por ejemplo: `OG2117-5890`.")
             else:
-                zip_buf = io.BytesIO()
-                with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-                    for nombre_arch, docx_bytes in archivos_generados.items():
-                        zf.writestr(nombre_arch, docx_bytes)
+                input_catalogo = partes[0].strip()
+                input_clase    = partes[1].strip()
+                try:
+                    with st.spinner("Buscando en la base de datos…"):
+                        resultado = leer_excel(
+                            archivo_path=_DB_PATH,
+                            filtro_catalogo=input_catalogo,
+                            filtro_clase=input_clase
+                        )
+                    if not resultado:
+                        st.error(f"No se encontraron registros para **{input_catalogo.upper()}-{input_clase}**. "
+                                 "Verifica el catálogo y número de clase.")
+                        st.session_state.profesores = {}
+                    else:
+                        st.session_state.profesores = resultado
+                        profesores = resultado
+                except Exception as e:
+                    st.error(f"Error al leer la base de datos: {e}")
 
-                st.success(f"✅ {len(archivos_generados)} informes generados correctamente.")
-                st.download_button(
-                    label="⬇️  Descargar todos los informes (.zip)",
-                    data=zip_buf.getvalue(),
-                    file_name="Informes_EAFIT.zip",
-                    mime="application/zip",
-                )
+    # ── Preview de resultados ──
+    if profesores:
+        try:
+            st.markdown('<div class="card"><div class="card-label">👥 Profesores encontrados</div>',
+                        unsafe_allow_html=True)
 
-elif buscar and not profesores:
-    pass  # El error ya se mostró arriba
-else:
-    st.info("🔍 Ingresa el código en formato **CATÁLOGO-CLASE** (ej: `OG2117-5890`) para comenzar.")
+            filas_html = ""
+            for nombre, datos in profesores.items():
+                info = datos["info"]
+                nf   = nombre_archivo_defecto(datos, nombre)
+                filas_html += f"""
+                <tr>
+                  <td class="name-cell">{nombre.title()}</td>
+                  <td>{info.get('curso','—')}</td>
+                  <td>{info.get('escuela','—')}</td>
+                  <td><span class="badge-ciclo">{info.get('ciclo','—')}</span></td>
+                  <td class="file-cell">{nf}.docx</td>
+                </tr>"""
+
+            st.markdown(f"""
+            <table class="preview-table">
+              <thead>
+                <tr>
+                  <th>Profesor</th><th>Curso</th><th>Escuela</th>
+                  <th>Semestre</th><th>Nombre del archivo</th>
+                </tr>
+              </thead>
+              <tbody>{filas_html}</tbody>
+            </table>
+            """, unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        except Exception as e:
+            st.error(f"Error al mostrar resultados: {e}")
+
+    # ── Sección: Generar informes ──
+    if profesores:
+        st.markdown('<div class="card"><div class="card-label">⚙️ Generar informes</div>',
+                    unsafe_allow_html=True)
+
+        total = len(profesores)
+        es_uno = total == 1
+
+        nombre_custom = None
+        if es_uno:
+            nombre_prof, datos_prof = next(iter(profesores.items()))
+            defecto = nombre_archivo_defecto(datos_prof, nombre_prof)
+            nombre_custom = st.text_input(
+                "Nombre del archivo (editable)",
+                value=defecto,
+                help="Puedes cambiar el nombre antes de generar"
+            )
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        if st.button(f"Generar {'informe' if es_uno else str(total) + ' informes'}"):
+            errores = []
+            archivos_generados = {}
+
+            barra = st.progress(0, text="Generando informes…")
+            for i, (nombre, datos) in enumerate(profesores.items()):
+                try:
+                    nf = nombre_custom if (es_uno and nombre_custom) else None
+                    docx_bytes, nombre_arch = generar_informe_bytes(
+                        nombre, datos, plantilla_bytes, nombre_archivo=nf
+                    )
+                    archivos_generados[nombre_arch + ".docx"] = docx_bytes
+                except Exception as e:
+                    errores.append(f"{nombre}: {e}")
+                barra.progress((i + 1) / total,
+                               text=f"Procesando {i+1} de {total}…")
+
+            barra.empty()
+
+            if errores:
+                for err in errores:
+                    st.error(f"❌ {err}")
+
+            if archivos_generados:
+                if len(archivos_generados) == 1:
+                    nombre_arch, docx_bytes = next(iter(archivos_generados.items()))
+                    st.session_state.ultimo_informe_generado = {
+                        "nombre": nombre_arch,
+                        "bytes": docx_bytes,
+                    }
+                    st.success(f"✅ Informe generado: **{nombre_arch}**")
+                    st.download_button(
+                        label="⬇️  Descargar informe",
+                        data=docx_bytes,
+                        file_name=nombre_arch,
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    )
+                else:
+                    zip_buf = io.BytesIO()
+                    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+                        for nombre_arch, docx_bytes in archivos_generados.items():
+                            zf.writestr(nombre_arch, docx_bytes)
+
+                    st.success(f"✅ {len(archivos_generados)} informes generados correctamente.")
+                    st.download_button(
+                        label="⬇️  Descargar todos los informes (.zip)",
+                        data=zip_buf.getvalue(),
+                        file_name="Informes_EAFIT.zip",
+                        mime="application/zip",
+                    )
+
+    elif buscar and not profesores:
+        pass  # El error ya se mostró arriba
+    else:
+        st.info("🔍 Ingresa el código en formato **CATÁLOGO-CLASE** (ej: `OG2117-5890`) para comenzar.")
 
 # ── Sección: Actualizar base de datos (al final) ──
 import base64
@@ -1224,83 +1497,243 @@ def _gh_push_file(token: str, content_bytes: bytes, sha: str | None, mensaje: st
             raise
     return False
 
-st.markdown("---")
-with st.expander("🔄 Actualizar base de datos de evaluación docente"):
-    if not _GH_TOKEN:
-        st.warning(
-            "⚠️ No se encontró el secreto **GITHUB_TOKEN** en Streamlit Cloud. "
-            "Agrégalo en *Settings → Secrets* para habilitar la actualización permanente."
-        )
-    else:
-        st.markdown(
-            "<small style='color:#4A5068'>Sube el Excel del nuevo semestre. "
-            "El archivo se guardará directamente en GitHub — el cambio es <b>permanente</b> "
-            "y la app se actualizará automáticamente en unos segundos.</small>",
-            unsafe_allow_html=True
-        )
-        nuevo_excel = st.file_uploader(
-            "Nuevo archivo de evaluaciones (.xlsx)",
-            type=["xlsx"],
-            key="uploader_db"
-        )
-        if nuevo_excel:
-            if st.button("✅ Confirmar actualización de base de datos"):
-                try:
-                    nuevos_bytes = nuevo_excel.getvalue()
+if PAGINA == "generar":
+    st.markdown("---")
+    with st.expander("🔄 Actualizar base de datos de evaluación docente"):
+        if not _GH_TOKEN:
+            st.warning(
+                "⚠️ No se encontró el secreto **GITHUB_TOKEN** en Streamlit Cloud. "
+                "Agrégalo en *Settings → Secrets* para habilitar la actualización permanente."
+            )
+        else:
+            st.markdown(
+                "<small style='color:#4A5068'>Sube el Excel del nuevo semestre. "
+                "El archivo se guardará directamente en GitHub — el cambio es <b>permanente</b> "
+                "y la app se actualizará automáticamente en unos segundos.</small>",
+                unsafe_allow_html=True
+            )
+            nuevo_excel = st.file_uploader(
+                "Nuevo archivo de evaluaciones (.xlsx)",
+                type=["xlsx"],
+                key="uploader_db"
+            )
+            if nuevo_excel:
+                if st.button("✅ Confirmar actualización de base de datos"):
+                    try:
+                        nuevos_bytes = nuevo_excel.getvalue()
 
-                    # 1. Validar estructura del Excel
-                    wb_test = openpyxl.load_workbook(io.BytesIO(nuevos_bytes), read_only=True)
-                    ws_test = wb_test.active
-                    headers_test = {}
-                    for row in ws_test.iter_rows(min_row=FILA_ENCABEZADO, max_row=FILA_ENCABEZADO, values_only=True):
-                        for i, val in enumerate(row):
-                            if val: headers_test[str(val).strip()] = i
-                        break
-                    cols_requeridas = [COL_NOMBRE, COL_CATALOGO, COL_NCLASE, COL_COMPETENCIA, COL_NOTA_FINAL]
-                    faltantes = [c for c in cols_requeridas if c not in headers_test]
-                    tamano_mb = len(nuevos_bytes) / (1024 * 1024)
-                    if faltantes:
-                        st.error(f"El archivo no tiene las columnas requeridas: {', '.join(faltantes)}")
-                    else:
-                        # ── Compresión automática si el archivo es pesado ──
-                        if tamano_mb > 20:
-                            with st.spinner(f"El archivo pesa {tamano_mb:.1f} MB — comprimiendo automáticamente…"):
-                                nuevos_bytes_comp = _comprimir_excel(nuevos_bytes)
-                                tamano_comp_mb    = len(nuevos_bytes_comp) / (1024 * 1024)
-                            ahorro = tamano_mb - tamano_comp_mb
-                            if ahorro > 0.05:
-                                st.info(
-                                    f"📦 Archivo comprimido: {tamano_mb:.1f} MB → **{tamano_comp_mb:.1f} MB** "
-                                    f"(ahorro de {ahorro:.1f} MB, sin pérdida de datos)."
-                                )
-                                nuevos_bytes = nuevos_bytes_comp
-                                tamano_mb    = tamano_comp_mb
-                            else:
-                                st.info(f"ℹ️ El archivo ya estaba bien comprimido ({tamano_mb:.1f} MB).")
-
-                        if tamano_mb > 99:
-                            st.error(
-                                f"❌ El archivo pesa **{tamano_mb:.1f} MB** incluso tras comprimirlo. "
-                                "La API de GitHub tiene un límite de ~100 MB. "
-                                "Elimina hojas o columnas que no se usen y vuelve a intentarlo."
-                            )
+                        # 1. Validar estructura del Excel
+                        wb_test = openpyxl.load_workbook(io.BytesIO(nuevos_bytes), read_only=True)
+                        ws_test = wb_test.active
+                        headers_test = {}
+                        for row in ws_test.iter_rows(min_row=FILA_ENCABEZADO, max_row=FILA_ENCABEZADO, values_only=True):
+                            for i, val in enumerate(row):
+                                if val: headers_test[str(val).strip()] = i
+                            break
+                        cols_requeridas = [COL_NOMBRE, COL_CATALOGO, COL_NCLASE, COL_COMPETENCIA, COL_NOTA_FINAL]
+                        faltantes = [c for c in cols_requeridas if c not in headers_test]
+                        tamano_mb = len(nuevos_bytes) / (1024 * 1024)
+                        if faltantes:
+                            st.error(f"El archivo no tiene las columnas requeridas: {', '.join(faltantes)}")
                         else:
-                            # 2. Subir a GitHub
-                            with st.spinner("Subiendo a GitHub…"):
-                                sha_actual = _gh_get_sha(_GH_TOKEN)
-                                ciclo_val  = ws_test.cell(row=1, column=2).value or ""
-                                commit_msg = f"Actualizar evaluaciones.xlsx — ciclo {ciclo_val} ({len(nuevos_bytes)//1024} KB)"
-                                ok = _gh_push_file(_GH_TOKEN, nuevos_bytes, sha_actual, commit_msg)
-                            if ok:
-                                st.cache_data.clear()
-                                st.success(
-                                    f"✅ Base de datos actualizada en GitHub ({len(nuevos_bytes)//1024} KB). "
-                                    "Streamlit Cloud redeployará la app en unos segundos con los datos nuevos."
+                            # ── Compresión automática si el archivo es pesado ──
+                            if tamano_mb > 20:
+                                with st.spinner(f"El archivo pesa {tamano_mb:.1f} MB — comprimiendo automáticamente…"):
+                                    nuevos_bytes_comp = _comprimir_excel(nuevos_bytes)
+                                    tamano_comp_mb    = len(nuevos_bytes_comp) / (1024 * 1024)
+                                ahorro = tamano_mb - tamano_comp_mb
+                                if ahorro > 0.05:
+                                    st.info(
+                                        f"📦 Archivo comprimido: {tamano_mb:.1f} MB → **{tamano_comp_mb:.1f} MB** "
+                                        f"(ahorro de {ahorro:.1f} MB, sin pérdida de datos)."
+                                    )
+                                    nuevos_bytes = nuevos_bytes_comp
+                                    tamano_mb    = tamano_comp_mb
+                                else:
+                                    st.info(f"ℹ️ El archivo ya estaba bien comprimido ({tamano_mb:.1f} MB).")
+
+                            if tamano_mb > 99:
+                                st.error(
+                                    f"❌ El archivo pesa **{tamano_mb:.1f} MB** incluso tras comprimirlo. "
+                                    "La API de GitHub tiene un límite de ~100 MB. "
+                                    "Elimina hojas o columnas que no se usen y vuelve a intentarlo."
                                 )
                             else:
-                                st.error("No se pudo subir el archivo a GitHub. Verifica el token y los permisos.")
-                except urllib.error.HTTPError as e:
-                    body = e.read().decode(errors="replace")
-                    st.error(f"Error de GitHub ({e.code}): {body}")
-                except Exception as e:
-                    st.error(f"Error al actualizar: {e}")
+                                # 2. Subir a GitHub
+                                with st.spinner("Subiendo a GitHub…"):
+                                    sha_actual = _gh_get_sha(_GH_TOKEN)
+                                    ciclo_val  = ws_test.cell(row=1, column=2).value or ""
+                                    commit_msg = f"Actualizar evaluaciones.xlsx — ciclo {ciclo_val} ({len(nuevos_bytes)//1024} KB)"
+                                    ok = _gh_push_file(_GH_TOKEN, nuevos_bytes, sha_actual, commit_msg)
+                                if ok:
+                                    st.cache_data.clear()
+                                    st.success(
+                                        f"✅ Base de datos actualizada en GitHub ({len(nuevos_bytes)//1024} KB). "
+                                        "Streamlit Cloud redeployará la app en unos segundos con los datos nuevos."
+                                    )
+                                else:
+                                    st.error("No se pudo subir el archivo a GitHub. Verifica el token y los permisos.")
+                    except urllib.error.HTTPError as e:
+                        body = e.read().decode(errors="replace")
+                        st.error(f"Error de GitHub ({e.code}): {body}")
+                    except Exception as e:
+                        st.error(f"Error al actualizar: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PÁGINA: ALISTAMIENTO DE CONSIDERACIONES
+# ═══════════════════════════════════════════════════════════════════════════
+
+if PAGINA == "consideraciones":
+    _GH_MODELS_TOKEN = st.secrets.get("GITHUB_MODELS_TOKEN", "")
+
+    st.markdown(
+        '<div class="card"><div class="card-label">✨ Alistamiento de Consideraciones</div>'
+        '<p style="color:#A8ACBE;font-size:0.88rem;margin:0.3rem 0 0 0">'
+        'Sube un informe ya generado por esta app y, opcionalmente, documentos guía '
+        '(formaciones EXA, protocolos, lineamientos, trabajo de grado) para que la IA '
+        'reescriba únicamente la sección <b>Consideraciones</b>. El resto del informe '
+        'no se modifica.</p></div>',
+        unsafe_allow_html=True
+    )
+
+    if not _GH_MODELS_TOKEN:
+        st.warning(
+            "⚠️ No se encontró el secreto **GITHUB_MODELS_TOKEN** en Streamlit Cloud. "
+            "Este módulo necesita un token de GitHub con permiso **models: read** para "
+            "funcionar. Ve a *Settings → Secrets* en Streamlit Cloud y agrégalo."
+        )
+        st.stop()
+
+    # ── Paso 1: Informe base (detectado automáticamente o subido) ──
+    st.markdown('<div class="card"><div class="card-label">1️⃣ Informe base (.docx)</div>',
+                unsafe_allow_html=True)
+
+    ultimo_informe = st.session_state.get("ultimo_informe_generado")
+
+    usar_otro = st.checkbox(
+        "Añadir consideraciones para otro informe (subir un .docx distinto)",
+        value=(ultimo_informe is None),   # si no hay informe reciente, se activa solo
+        key="usar_otro_informe"
+    )
+
+    informe_bytes_base  = None
+    informe_nombre_base = None
+
+    if not usar_otro and ultimo_informe is not None:
+        st.success(f"✅ Documento generado encontrado: **{ultimo_informe['nombre']}**")
+        informe_bytes_base  = ultimo_informe["bytes"]
+        informe_nombre_base = ultimo_informe["nombre"]
+    elif not usar_otro and ultimo_informe is None:
+        st.info("Todavía no se ha generado ningún informe en esta sesión. Marca la casilla para subir uno manualmente.")
+    else:
+        informe_subido = st.file_uploader(
+            "Sube el informe (.docx) generado por esta app",
+            type=["docx"],
+            key="uploader_informe_base"
+        )
+        if informe_subido is not None:
+            informe_bytes_base  = informe_subido.getvalue()
+            informe_nombre_base = informe_subido.name
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Paso 2: Documentos guía (opcional) ──
+    st.markdown('<div class="card"><div class="card-label">2️⃣ Documentos guía (opcional)</div>',
+                unsafe_allow_html=True)
+    docs_guia = st.file_uploader(
+        "Formaciones EXA, protocolos, lineamientos, trabajo de grado…",
+        type=["pdf", "docx", "txt"],
+        accept_multiple_files=True,
+        key="uploader_docs_guia"
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Paso 3: Indicación adicional (opcional) ──
+    st.markdown('<div class="card"><div class="card-label">3️⃣ Indicación adicional (opcional)</div>',
+                unsafe_allow_html=True)
+    instruccion_usuaria = st.text_area(
+        "¿Qué quieres rescatar de los documentos guía, qué enfoque esperas o qué "
+        "resultado buscas en la versión final?",
+        placeholder="Ej: Enfatiza el acompañamiento pedagógico y sugiere una formación EXA concreta…",
+        height=100,
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Estado de sesión para el texto generado ──
+    if "consideraciones_texto" not in st.session_state:
+        st.session_state.consideraciones_texto = ""
+    if "consideraciones_docx_bytes" not in st.session_state:
+        st.session_state.consideraciones_docx_bytes = None
+    if "consideraciones_nombre_archivo" not in st.session_state:
+        st.session_state.consideraciones_nombre_archivo = None
+
+    col_gen, col_regen = st.columns([1, 1])
+    with col_gen:
+        generar_clic = st.button("✨ Generar Consideraciones", use_container_width=True,
+                                  disabled=(informe_bytes_base is None))
+    with col_regen:
+        regenerar_clic = st.button("🔁 Regenerar", use_container_width=True,
+                                    disabled=(not st.session_state.consideraciones_texto))
+
+    if informe_bytes_base is None:
+        st.info("📄 Sube el informe (.docx) generado por la app para continuar.")
+
+    if (generar_clic or regenerar_clic) and informe_bytes_base is not None:
+        try:
+            with st.spinner("Leyendo el informe y los documentos guía…"):
+                informe_bytes = informe_bytes_base
+                info_informe  = extraer_texto_informe_actual(informe_bytes)
+
+                contexto_partes = []
+                for doc in (docs_guia or []):
+                    texto_doc = extraer_texto_referencia(doc.name, doc.getvalue())
+                    if texto_doc.strip():
+                        contexto_partes.append(f"--- {doc.name} ---\n{texto_doc.strip()}")
+                contexto_docs = "\n\n".join(contexto_partes)
+
+            with st.spinner("Generando Consideraciones con IA…"):
+                texto_generado = generar_consideraciones_ia(
+                    _GH_MODELS_TOKEN, info_informe, contexto_docs, instruccion_usuaria
+                )
+
+            st.session_state.consideraciones_texto = texto_generado
+            st.session_state.consideraciones_docx_bytes = informe_bytes
+            st.session_state.consideraciones_nombre_archivo = informe_nombre_base
+            st.success("✅ Consideraciones generadas. Puedes revisarlas y editarlas abajo antes de descargar.")
+        except RuntimeError as e:
+            st.error(f"❌ {e}")
+        except Exception as e:
+            st.error(f"❌ Error inesperado al generar Consideraciones: {e}")
+
+    # ── Previsualización y edición ──
+    if st.session_state.consideraciones_texto:
+        st.markdown('<div class="card"><div class="card-label">📝 Vista previa — editable</div>',
+                    unsafe_allow_html=True)
+        texto_editado = st.text_area(
+            "Revisa, ajusta y valida el contenido antes de incorporarlo al informe",
+            value=st.session_state.consideraciones_texto,
+            height=260,
+            key="texto_consideraciones_editor"
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        if st.button("✅ Incorporar al informe y preparar descarga", use_container_width=True):
+            try:
+                with st.spinner("Insertando Consideraciones en el informe…"):
+                    docx_final = insertar_consideraciones_en_docx(
+                        st.session_state.consideraciones_docx_bytes, texto_editado
+                    )
+                nombre_final = st.session_state.consideraciones_nombre_archivo
+                st.success(f"✅ Informe actualizado: **{nombre_final}**")
+                st.download_button(
+                    label="⬇️  Descargar informe con Consideraciones",
+                    data=docx_final,
+                    file_name=nombre_final,
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            except RuntimeError as e:
+                st.error(f"❌ {e}")
+            except Exception as e:
+                st.error(f"❌ Error al insertar Consideraciones en el informe: {e}")
+
