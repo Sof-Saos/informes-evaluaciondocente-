@@ -1428,9 +1428,10 @@ import json as _json
 _GH_REPO  = "Sof-Saos/informes-evaluaciondocente-"   # usuario/repo
 _GH_FILE  = "evaluaciones.xlsx"                        # ruta dentro del repo
 _GH_TOKEN = st.secrets.get("GITHUB_TOKEN", "")        # secreto en Streamlit Cloud
+_GH_DOCS_FOLDER = "docs_guia"                          # carpeta de documentos guía persistentes
 
 def _gh_get_sha(token: str) -> str | None:
-    """Obtiene el SHA actual del archivo en GitHub (necesario para actualizarlo)."""
+    """Obtiene el SHA actual del archivo evaluaciones.xlsx en GitHub."""
     url = f"https://api.github.com/repos/{_GH_REPO}/contents/{_GH_FILE}"
     req = urllib.request.Request(url, headers={
         "Authorization": f"Bearer {token}",
@@ -1442,8 +1443,104 @@ def _gh_get_sha(token: str) -> str | None:
             return _json.loads(r.read())["sha"]
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            return None   # archivo no existe todavía
+            return None
         raise
+
+def _gh_get_file_sha(token: str, path: str) -> str | None:
+    """Obtiene el SHA de cualquier archivo en el repo (necesario para actualizarlo)."""
+    url = f"https://api.github.com/repos/{_GH_REPO}/contents/{path}"
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return _json.loads(r.read())["sha"]
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise
+
+def _gh_upload_doc_guia(token: str, nombre: str, contenido: bytes) -> bool:
+    """Sube un documento guía a docs_guia/ en el repo. Si ya existe, lo actualiza."""
+    import base64
+    path = f"{_GH_DOCS_FOLDER}/{nombre}"
+    url  = f"https://api.github.com/repos/{_GH_REPO}/contents/{path}"
+    sha  = _gh_get_file_sha(token, path)   # None si no existe aún
+    payload = {
+        "message": f"Agregar/actualizar documento guía: {nombre}",
+        "content": base64.b64encode(contenido).decode(),
+        "branch": "main",
+    }
+    if sha:
+        payload["sha"] = sha
+    data = _json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, method="PUT", headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    })
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return r.status in (200, 201)
+
+def _gh_delete_doc_guia(token: str, nombre: str) -> bool:
+    """Elimina un documento guía de docs_guia/ en el repo."""
+    path = f"{_GH_DOCS_FOLDER}/{nombre}"
+    sha  = _gh_get_file_sha(token, path)
+    if not sha:
+        return True   # ya no existe
+    url  = f"https://api.github.com/repos/{_GH_REPO}/contents/{path}"
+    payload = {
+        "message": f"Eliminar documento guía: {nombre}",
+        "sha": sha,
+        "branch": "main",
+    }
+    data = _json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, method="DELETE", headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    })
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.status in (200, 201)
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _gh_listar_docs_guia(token: str) -> list[dict]:
+    """
+    Lista los documentos guardados en docs_guia/ del repo.
+    Devuelve lista de dicts: [{nombre, download_url, sha, size}].
+    Cacheado 60s para no hammear la API en cada rerun de Streamlit.
+    """
+    url = f"https://api.github.com/repos/{_GH_REPO}/contents/{_GH_DOCS_FOLDER}"
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            items = _json.loads(r.read())
+            return [
+                {"nombre": i["name"], "url": i["download_url"],
+                 "sha": i["sha"], "size": i.get("size", 0)}
+                for i in items if i["type"] == "file"
+            ]
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return []   # carpeta no existe aún
+        raise
+
+def _gh_descargar_doc(url: str, token: str) -> bytes:
+    """Descarga el contenido de un archivo desde su download_url de GitHub."""
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github.raw",
+    })
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read()
 
 def _comprimir_excel(archivo_bytes: bytes) -> bytes:
     """
@@ -1638,15 +1735,101 @@ if PAGINA == "consideraciones":
 
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── Paso 2: Documentos guía (opcional) ──
-    st.markdown('<div class="card"><div class="card-label">2️⃣ Documentos guía (opcional)</div>',
+    # ── Paso 2: Documentos guía (persistentes en GitHub + subida de nuevos) ──
+    st.markdown('<div class="card"><div class="card-label">2️⃣ Documentos guía</div>',
                 unsafe_allow_html=True)
-    docs_guia = st.file_uploader(
-        "Formaciones EXA, protocolos, lineamientos, trabajo de grado…",
-        type=["pdf", "docx", "txt"],
-        accept_multiple_files=True,
-        key="uploader_docs_guia"
-    )
+
+    docs_seleccionados_nombres = []   # nombres de los docs persistentes a usar
+    docs_nuevos_bytes = []            # [(nombre, bytes)] de archivos recién subidos
+
+    if not _GH_TOKEN:
+        st.warning("⚠️ Sin **GITHUB_TOKEN** configurado, los documentos no se pueden guardar permanentemente. "
+                   "Puedes usarlos solo para esta sesión.")
+        docs_guia_sesion = st.file_uploader(
+            "Sube documentos guía (PDF, DOCX, TXT)",
+            type=["pdf", "docx", "txt"],
+            accept_multiple_files=True,
+            key="uploader_docs_guia_sesion"
+        )
+        docs_nuevos_bytes = [(d.name, d.getvalue()) for d in (docs_guia_sesion or [])]
+    else:
+        # ── Documentos ya guardados en GitHub ──
+        try:
+            docs_persistentes = _gh_listar_docs_guia(_GH_TOKEN)
+        except Exception as e:
+            docs_persistentes = []
+            st.warning(f"No se pudo listar los documentos guardados: {e}")
+
+        if docs_persistentes:
+            st.markdown(
+                "<small style='color:#A8ACBE'>Documentos guardados en el repositorio — "
+                "marca los que quieres usar como referencia para la IA:</small>",
+                unsafe_allow_html=True
+            )
+            col_check, col_del = st.columns([5, 1])
+            for doc in docs_persistentes:
+                size_kb = doc["size"] // 1024
+                with col_check:
+                    seleccionado = st.checkbox(
+                        f"📄 {doc['nombre']} ({size_kb} KB)",
+                        value=True,
+                        key=f"doc_persistente_{doc['nombre']}"
+                    )
+                    if seleccionado:
+                        docs_seleccionados_nombres.append(doc)
+                with col_del:
+                    st.markdown("<div style='margin-top:0.4rem'>", unsafe_allow_html=True)
+                    if st.button("🗑️", key=f"del_{doc['nombre']}",
+                                 help=f"Eliminar {doc['nombre']} permanentemente del repositorio"):
+                        try:
+                            with st.spinner(f"Eliminando {doc['nombre']}…"):
+                                _gh_delete_doc_guia(_GH_TOKEN, doc["nombre"])
+                                st.cache_data.clear()
+                            st.success(f"✅ {doc['nombre']} eliminado.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error al eliminar: {e}")
+                    st.markdown("</div>", unsafe_allow_html=True)
+        else:
+            st.info("Todavía no hay documentos guía guardados. Sube los primeros abajo.")
+
+        # ── Subir nuevos documentos (se guardan en GitHub automáticamente) ──
+        st.markdown(
+            "<small style='color:#A8ACBE;margin-top:0.8rem;display:block'>"
+            "Sube nuevos documentos — quedarán guardados permanentemente en el repositorio "
+            "y disponibles en todas las sesiones futuras:</small>",
+            unsafe_allow_html=True
+        )
+        nuevos_subidos = st.file_uploader(
+            "Formaciones EXA, protocolos, lineamientos, trabajo de grado…",
+            type=["pdf", "docx", "txt"],
+            accept_multiple_files=True,
+            key="uploader_docs_guia_nuevos"
+        )
+        if nuevos_subidos:
+            if st.button("💾 Guardar nuevos documentos en el repositorio",
+                         key="btn_guardar_docs"):
+                errores_subida = []
+                with st.spinner(f"Guardando {len(nuevos_subidos)} documento(s)…"):
+                    for doc in nuevos_subidos:
+                        try:
+                            _gh_upload_doc_guia(_GH_TOKEN, doc.name, doc.getvalue())
+                            docs_nuevos_bytes.append((doc.name, doc.getvalue()))
+                        except Exception as e:
+                            errores_subida.append(f"{doc.name}: {e}")
+                if errores_subida:
+                    for err in errores_subida:
+                        st.error(f"❌ {err}")
+                else:
+                    st.cache_data.clear()
+                    st.success(f"✅ {len(nuevos_subidos)} documento(s) guardado(s). "
+                               "Aparecerán en la lista la próxima vez que abras este módulo.")
+                    st.rerun()
+            else:
+                # Aunque no se hayan guardado aún, se usan en esta sesión si el
+                # usuario genera consideraciones sin haber hecho clic en "Guardar"
+                docs_nuevos_bytes = [(d.name, d.getvalue()) for d in nuevos_subidos]
+
     st.markdown('</div>', unsafe_allow_html=True)
 
     # ── Paso 3: Indicación adicional (opcional) ──
@@ -1686,10 +1869,23 @@ if PAGINA == "consideraciones":
                 info_informe  = extraer_texto_informe_actual(informe_bytes)
 
                 contexto_partes = []
-                for doc in (docs_guia or []):
-                    texto_doc = extraer_texto_referencia(doc.name, doc.getvalue())
+
+                # Documentos persistentes seleccionados (se descargan desde GitHub)
+                for doc in docs_seleccionados_nombres:
+                    try:
+                        contenido = _gh_descargar_doc(doc["url"], _GH_TOKEN)
+                        texto_doc = extraer_texto_referencia(doc["nombre"], contenido)
+                        if texto_doc.strip():
+                            contexto_partes.append(f"--- {doc['nombre']} ---\n{texto_doc.strip()}")
+                    except Exception:
+                        pass   # Si un doc no se puede descargar, se omite silenciosamente
+
+                # Documentos nuevos subidos en esta sesión (ya en memoria)
+                for nombre_doc, bytes_doc in docs_nuevos_bytes:
+                    texto_doc = extraer_texto_referencia(nombre_doc, bytes_doc)
                     if texto_doc.strip():
-                        contexto_partes.append(f"--- {doc.name} ---\n{texto_doc.strip()}")
+                        contexto_partes.append(f"--- {nombre_doc} ---\n{texto_doc.strip()}")
+
                 contexto_docs = "\n\n".join(contexto_partes)
 
             with st.spinner("Generando Consideraciones con IA…"):
