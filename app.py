@@ -1806,29 +1806,37 @@ if PAGINA == "consideraciones":
             accept_multiple_files=True,
             key="uploader_docs_guia_nuevos"
         )
+
+        # Guardar en session_state en cuanto se suben (antes de cualquier botón/rerun)
         if nuevos_subidos:
+            st.session_state["_docs_pendientes"] = [
+                (d.name, d.getvalue()) for d in nuevos_subidos
+            ]
+
+        docs_pendientes = st.session_state.get("_docs_pendientes", [])
+
+        if docs_pendientes:
             if st.button("💾 Guardar nuevos documentos en el repositorio",
                          key="btn_guardar_docs"):
                 errores_subida = []
-                with st.spinner(f"Guardando {len(nuevos_subidos)} documento(s)…"):
-                    for doc in nuevos_subidos:
+                with st.spinner(f"Guardando {len(docs_pendientes)} documento(s)…"):
+                    for nombre_doc, bytes_doc in docs_pendientes:
                         try:
-                            _gh_upload_doc_guia(_GH_TOKEN, doc.name, doc.getvalue())
-                            docs_nuevos_bytes.append((doc.name, doc.getvalue()))
+                            _gh_upload_doc_guia(_GH_TOKEN, nombre_doc, bytes_doc)
+                            docs_nuevos_bytes.append((nombre_doc, bytes_doc))
                         except Exception as e:
-                            errores_subida.append(f"{doc.name}: {e}")
+                            errores_subida.append(f"{nombre_doc}: {e}")
                 if errores_subida:
                     for err in errores_subida:
                         st.error(f"❌ {err}")
                 else:
+                    st.session_state.pop("_docs_pendientes", None)
                     st.cache_data.clear()
-                    st.success(f"✅ {len(nuevos_subidos)} documento(s) guardado(s). "
-                               "Aparecerán en la lista la próxima vez que abras este módulo.")
+                    st.success(f"✅ {len(docs_pendientes)} documento(s) guardado(s) en el repositorio.")
                     st.rerun()
             else:
-                # Aunque no se hayan guardado aún, se usan en esta sesión si el
-                # usuario genera consideraciones sin haber hecho clic en "Guardar"
-                docs_nuevos_bytes = [(d.name, d.getvalue()) for d in nuevos_subidos]
+                # No guardados aún, pero disponibles para usar en esta sesión
+                docs_nuevos_bytes = [(n, b) for n, b in docs_pendientes]
 
     st.markdown('</div>', unsafe_allow_html=True)
 
