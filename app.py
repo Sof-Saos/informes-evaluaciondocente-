@@ -318,7 +318,7 @@ def _procesar_filas(rows, headers) -> dict:
 def generar_informe_bytes(nombre: str, datos: dict,
                           plantilla_bytes: bytes,
                           nombre_archivo: str = None) -> tuple[bytes, str]:
-    """Devuelve (docx_bytes, nombre_archivo). Compatible con Plantilla V2."""
+    """Devuelve (docx_bytes, nombre_archivo). Compatible con Plantilla2 (placeholders explícitos)."""
     info                    = datos["info"]
     nota_curso              = datos["nota_curso"]
     nota_final              = datos["nota_final"]
@@ -333,98 +333,69 @@ def generar_informe_bytes(nombre: str, datos: dict,
     tree = etree.fromstring(
         zipfile.ZipFile(io.BytesIO(plantilla_bytes)).read('word/document.xml')
     )
-    body          = tree.find(W+'body')
-    body_children = list(body)
+    body = tree.find(W+'body')
 
     def texto_de(elem):
         return ''.join(t.text or '' for t in elem.iter(W+'t')).strip()
 
-    def set_parrafo_valor(elem, label: str, valor: str):
+    def reemplazar(elem, placeholder: str, valor: str):
         """
-        En un párrafo que dice 'Label:' (o 'Label: '), deja el texto como 'Label: VALOR'.
-        Reutiliza el primer run existente para conservar el estilo; si no hay runs, crea uno.
+        Reemplaza placeholder en el texto concatenado de todos los runs de un elemento.
+        Word frecuentemente fragmenta el texto en múltiples <w:r> y <w:t>, por lo que
+        buscar placeholder en cada <w:t> individual falla. Esta función consolida el texto
+        de cada párrafo en un único run antes de reemplazar, preservando el estilo del
+        primer run original.
         """
-        # Limpiar todos los runs existentes
-        for r in elem.findall('.//' + W+'r'):
-            for t in r.findall(W+'t'):
-                t.text = ''
-        runs = elem.findall('.//' + W+'r')
-        texto_completo = f"{label} {valor}"
-        if runs:
-            ts = runs[0].findall(W+'t')
-            if ts:
-                ts[0].text = texto_completo
-                ts[0].set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
-            else:
-                t = etree.SubElement(runs[0], W+'t')
-                t.text = texto_completo
-                t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
-        else:
-            r = etree.SubElement(elem, W+'r')
-            t = etree.SubElement(r, W+'t')
-            t.text = texto_completo
-            t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+        for para in elem.iter(W+'p'):
+            runs = para.findall('.//' + W+'r')
+            if not runs:
+                continue
+            # Texto completo del párrafo concatenando todos los <w:t>
+            texto_completo = ''.join(t.text or '' for r in runs for t in r.findall(W+'t'))
+            if placeholder not in texto_completo:
+                continue
+            # Reemplazar el placeholder
+            nuevo_texto = texto_completo.replace(placeholder, valor)
+            # Tomar el estilo (rPr) del primer run
+            primer_run = runs[0]
+            rpr = primer_run.find(W+'rPr')
+            # Eliminar todos los runs del párrafo
+            for r in runs:
+                para.remove(r)
+            # Crear un único run nuevo con el texto reemplazado
+            new_r = etree.SubElement(para, W+'r')
+            if rpr is not None:
+                new_r.insert(0, deepcopy(rpr))
+            new_t = etree.SubElement(new_r, W+'t')
+            new_t.text = nuevo_texto
+            new_t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
 
-    def set_celda_valor(cell_elem, valor: str):
-        """Escribe un valor en una celda de tabla vacía, creando el run si hace falta."""
-        runs = cell_elem.findall('.//' + W+'r')
-        for r in runs:
-            for t in r.findall(W+'t'):
-                t.text = ''
-        if runs:
-            ts = runs[0].findall(W+'t')
-            if ts:
-                ts[0].text = valor
-            else:
-                etree.SubElement(runs[0], W+'t').text = valor
-        else:
-            paras = cell_elem.findall('.//' + W+'p')
-            p = paras[0] if paras else etree.SubElement(cell_elem, W+'p')
-            r = etree.SubElement(p, W+'r')
-            t = etree.SubElement(r, W+'t')
-            t.text = valor
-
-    # ── Portada: buscar cada párrafo por su label y escribir el valor ──
-    # V2: párrafos separados por campo, búsqueda por texto del párrafo
-    tasa = ""
+    # ── Tasa de respuesta ──
+    tasa_str = ""
     if total_generadas and evaluaciones_realizadas and total_generadas > 0:
-        tasa = f"{round(evaluaciones_realizadas / total_generadas * 100)}%"
+        tasa_str = f"{round(evaluaciones_realizadas / total_generadas * 100)}%"
 
-    # Mapa label-texto → valor a escribir
-    campos_portada = {
-        "Nombre del curso":    (info.get('curso', ''), "Nombre del curso:"),
-        "Nombre del programa": (info.get('escuela', ''), "Nombre del programa:"),
-        "Código curso":        (info.get('catalogo_clase', ''), "Código curso:"),
-        "Semestre":            (info.get('ciclo', ''), "Semestre:"),
-        "Modalidad":           (info.get('modalidad', ''), "Modalidad:"),
-        "Nombre profesora":    (nombre.title(), "Nombre profesora:"),
-        "Tasa de respuesta":   (tasa, "Tasa de respuesta:"),
-    }
+    # ── Portada: placeholders directos ──
+    reemplazar(body, '{Nombre_del_curso}', info.get('curso', ''))
+    reemplazar(body, '{Nombre_programa}',  info.get('escuela', ''))
+    reemplazar(body, '{Numero_codigo}',    info.get('catalogo_clase', ''))
+    reemplazar(body, '{Numero_semestre}',  info.get('ciclo', ''))
+    reemplazar(body, '{Modalidad}',        info.get('modalidad', ''))
+    reemplazar(body, '{Nombre_profesor}',  nombre.title())
 
-    for child in body_children:
-        txt = texto_de(child)
-        for key, (valor, label_display) in campos_portada.items():
-            if txt.startswith(key):
-                set_parrafo_valor(child, label_display, valor)
-                break
+    # ── Tasa de respuesta: párrafo "Tasa de respuesta: %" → "Tasa de respuesta: 47%" ──
+    for child in list(body):
+        if 'Tasa de respuesta' in texto_de(child):
+            reemplazar(child, '%', tasa_str)
+            break
 
-    # ── Tabla competencias (idx 49 en V2): reemplazar por diagrama de araña ──
-    # Buscar por posición: primera tabla DESPUÉS del párrafo "Diagrama de araña"
-    idx_araña = next(
-        (i for i, c in enumerate(body_children)
-         if texto_de(c).strip().lower().startswith("diagrama de araña")),
-        None
-    )
-    tbl_comp = None
-    if idx_araña is not None:
-        for c in body_children[idx_araña:]:
-            if c.tag == W+'tbl':
-                tbl_comp = c
-                break
-    # Fallback: índice fijo V2
-    if tbl_comp is None and len(body_children) > 49:
-        tbl_comp = body_children[49]
+    # ── Tabla estudiantes: placeholders {{number_students_answered}} / {{total_number_students}} ──
+    reemplazar(body, '{{number_students_answered}}',
+               str(evaluaciones_realizadas) if evaluaciones_realizadas is not None else '—')
+    reemplazar(body, '{{total_number_students}}',
+               str(total_generadas) if total_generadas is not None else '—')
 
+    # ── Diagrama de araña: párrafo {{Spider_diagram}} → imagen PNG ──
     notas_comp_raw = datos.get("notas_competencias", {})
     ORDEN_COMPETENCIAS = [
         "Relacional (Calidad Humana)",
@@ -437,14 +408,14 @@ def generar_informe_bytes(nombre: str, datos: dict,
 
     _spider_png_data = _spider_img_rid = _spider_img_target = None
 
-    if tbl_comp is not None and notas_comp and len(notas_comp) >= 3:
+    p_spider = next((c for c in list(body) if '{{Spider_diagram}}' in texto_de(c)), None)
+    if p_spider is not None and notas_comp and len(notas_comp) >= 3:
         png_bytes  = _spider_chart_png(notas_comp)
         img_rid    = "rIdSpider"
         img_name   = "spider_chart.png"
         img_target = f"media/{img_name}"
+        EMU_W = EMU_H = 5000000   # ~13.9 cm cuadrado
 
-        EMU_W = 5400000
-        EMU_H = 5400000
         draw_xml = (
             f'<w:p xmlns:w="{W[1:-1]}"'
             f' xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"'
@@ -471,86 +442,73 @@ def generar_informe_bytes(nombre: str, datos: dict,
             f'</wp:inline></w:drawing></w:r></w:p>'
         )
         img_para = etree.fromstring(draw_xml)
-        tbl_pos  = list(body).index(tbl_comp)
-        body.remove(tbl_comp)
-        body.insert(tbl_pos, img_para)
+        pos = list(body).index(p_spider)
+        body.remove(p_spider)
+        body.insert(pos, img_para)
         _spider_png_data   = png_bytes
         _spider_img_rid    = img_rid
         _spider_img_target = img_target
+    elif p_spider is not None:
+        reemplazar(p_spider, '{{Spider_diagram}}', '')
 
-    # ── Tabla estudiantes: buscar la primera tabla ANTES del diagrama de araña ──
-    # V2: idx 45 — buscamos dinámicamente la tabla con "Número de estudiantes"
-    tbl_est = None
-    for c in list(body):
-        if c.tag == W+'tbl':
-            header_text = texto_de(c)
-            if 'estudiantes' in header_text.lower():
-                tbl_est = c
-                break
+    # ── Tabla competencias: llenar {note} por fila según el nombre de la competencia ──
+    COMP_MAP = {
+        "índice de recomendación":     "Índice de recomendación",
+        "pacto pedagógico":            "Pacto Pedagógico",
+        "pedagógica":                  "Pedagógica",
+        "relacional (calidad humana)": "Relacional (Calidad Humana)",
+        "relacional (respeto)":        "Relacional (Respeto)",
+    }
+    nota_final_curso = nota_curso if nota_curso else nota_final
 
-    if tbl_est is not None:
-        rows = tbl_est.findall('.//' + W+'tr')
-        for row in rows:
+    for child in list(body):
+        if child.tag != W+'tbl':
+            continue
+        header = texto_de(list(child.findall('.//' + W+'tr'))[0])
+        if 'competencias' not in header.lower():
+            continue
+        for row in child.findall('.//' + W+'tr')[1:]:
             cells = row.findall(W+'tc')
             if len(cells) < 2:
                 continue
-            label = texto_de(cells[0]).lower()
-            if 'respondieron' in label or 'realizadas' in label:
-                set_celda_valor(cells[1],
-                    str(evaluaciones_realizadas) if evaluaciones_realizadas is not None else '—')
-            elif 'total' in label or 'generadas' in label:
-                set_celda_valor(cells[1],
-                    str(total_generadas) if total_generadas is not None else '—')
+            nombre_comp = texto_de(cells[0]).rstrip('\xa0\u202f').strip().lower()
+            clave       = COMP_MAP.get(nombre_comp)
+            if clave and clave in notas_comp_raw:
+                valor = fmt_nota(notas_comp_raw[clave])
+            elif 'nota final' in nombre_comp or 'final del curso' in nombre_comp:
+                valor = fmt_nota(nota_final_curso) if nota_final_curso else '—'
+            else:
+                valor = '—'
+            reemplazar(cells[1], '{note}', valor)
+        break
 
-    # ── Comentarios: buscar placeholders {Comentario} en el cuerpo actual ──
-    # V2: 3 placeholders por sección (no 5). Búsqueda por texto exacto '{Comentario}'.
-    # Los títulos de sección son párrafos de texto antes de los placeholders.
+    # ── Comentarios: reemplazar {Comentario} (con viñeta heredada del template) ──
     def get_comentarios(clave):
         for k, lista in comentarios.items():
             if clave in k.lower():
                 return lista
         return []
 
-    # Mapa: fragmento del título → clave de búsqueda en comentarios
-    SECCIONES = [
-        ("positivo",  "positivo"),
-        ("mejorar",   "mejorar"),
-        ("adicional", "adicional"),
-    ]
-
-    # Reconstruir body_children después de posibles inserciones anteriores
-    body_children = list(body)
-
-    for titulo_frag, clave in SECCIONES:
-        # Encontrar el índice del párrafo título de esta sección
-        idx_titulo = None
-        for i, c in enumerate(body_children):
-            if titulo_frag in texto_de(c).lower():
-                idx_titulo = i
-                break
+    for titulo_frag, clave in [("positivo","positivo"),("mejorar","mejorar"),("adicional","adicional")]:
+        body_children = list(body)
+        idx_titulo = next((i for i, c in enumerate(body_children)
+                           if titulo_frag in texto_de(c).lower()), None)
         if idx_titulo is None:
             continue
-
-        # Recolectar los placeholders {Comentario} que siguen al título
         placeholders = []
         for c in body_children[idx_titulo + 1:]:
             t = texto_de(c)
             if t == '{Comentario}':
                 placeholders.append(c)
             elif t and t != '{Comentario}':
-                # Llegamos al siguiente bloque con texto real → parar
                 break
-
         if not placeholders:
             continue
-
         template_para = placeholders[0]
         insert_pos    = list(body).index(placeholders[0])
         for pp in placeholders:
             body.remove(pp)
-
-        textos_sec = get_comentarios(clave)
-        for j, texto in enumerate(textos_sec):
+        for j, texto in enumerate(get_comentarios(clave)):
             new_p  = clone_bullet_para(template_para)
             all_ts = list(new_p.iter(W+'t'))
             if all_ts:
@@ -560,10 +518,12 @@ def generar_informe_bytes(nombre: str, datos: dict,
                     t.text = ''
             body.insert(insert_pos + j, new_p)
 
-        # Actualizar body_children para la siguiente iteración
-        body_children = list(body)
+    # ── Consideraciones: limpiar el placeholder {Comentario parrafo} ──
+    # Se deja vacío aquí; el módulo de IA lo rellena después si se usa
+    reemplazar(body, '{Comentario parrafo}', '')
 
     # ── Empaquetar ──
+
     new_xml = etree.tostring(tree, xml_declaration=True, encoding='UTF-8', standalone=True)
     out_buf  = io.BytesIO()
     with zipfile.ZipFile(io.BytesIO(plantilla_bytes), 'r') as zin:
