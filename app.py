@@ -1452,21 +1452,18 @@ if plantilla_bytes is None:
              "Asegúrate de subir ese archivo a GitHub junto con `app.py`.")
     st.stop()
 
-# ── Menú de navegación (sidebar / menú hamburguesa) ──
+# ── Menú de navegación (barra en el contenido principal, siempre visible) ──
 if "pagina_actual" not in st.session_state:
     st.session_state.pagina_actual = "generar"
 
-with st.sidebar:
-    st.markdown(
-        '<div style="font-size:0.75rem;color:#4A5068;text-transform:uppercase;'
-        'letter-spacing:0.05em;margin-bottom:0.8rem">Navegación</div>',
-        unsafe_allow_html=True
-    )
+col_nav1, col_nav2 = st.columns(2)
+with col_nav1:
     if st.button("📋  Generar informe", use_container_width=True,
                  type=("primary" if st.session_state.pagina_actual == "generar" else "secondary")):
         st.session_state.pagina_actual = "generar"
         st.rerun()
-    if st.button("✨  Alistamiento de Consideraciones", use_container_width=True,
+with col_nav2:
+    if st.button("✨  Consideraciones", use_container_width=True,
                  type=("primary" if st.session_state.pagina_actual == "consideraciones" else "secondary")):
         st.session_state.pagina_actual = "consideraciones"
         st.rerun()
