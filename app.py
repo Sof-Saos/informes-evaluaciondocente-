@@ -1016,39 +1016,29 @@ def generar_consideraciones_ia(token: str, info_informe: dict, contexto_docs: st
         _trat, _pnombre, _el_la = "Profesor/a", "docente", "el/la"
 
     prompt_sistema = (
-        "Actúa como un Diseñador Instruccional experto del Centro para la Excelencia en el "
-        "Aprendizaje (EXA) de la Universidad EAFIT. Tu objetivo es analizar los resultados de "
-        "la evaluación docente de un curso virtual o híbrido y generar una retroalimentación "
-        "formativa, estratégica y empática, basada en el protocolo institucional.\n\n"
-        f"IMPORTANTE: Dirígete SIEMPRE al docente en segunda persona (tutéalo) y usa su nombre "
-        f"'{_pnombre}' de forma natural a lo largo del texto. El texto debe comenzar obligatoriamente "
-        f"con '{_trat} {_pnombre},' seguido de la retroalimentación. "
-        "No incluyas títulos de sección como encabezados separados — intégralos fluidamente en el texto.\n\n"
-        "INSTRUCCIONES DE TAREA:\n"
-        "Analiza los datos bajo los principios de feedforward y evaluación integral. "
-        "Genera un informe formativo con las siguientes secciones:\n\n"
-        "1. PANORAMA GENERAL Y FORTALEZAS (máx. 300 palabras — un solo párrafo)\n"
-        "Redacta un único párrafo narrativo que cumpla las dos funciones a la vez: abre con un "
-        "reconocimiento cordial y concreto de sus principales fortalezas, basadas en los "
-        "comentarios de los estudiantes y los datos cuantitativos; luego, en continuidad fluida, "
-        "ofrece una síntesis interpretativa del panorama general del desempeño. Destaca 2 de sus "
-        "fortalezas y anuncia con lenguaje constructivo las 2-3 áreas que se abordarán a "
-        "continuación. Usa un tono profesional, empático y de acompañamiento — nunca de juicio. "
-        "Evita viñetas; todo debe fluir como prosa.\n\n"
-        "2. CONSIDERACIONES Y ACCIONES DE MEJORA\n"
-        "Presenta entre 2 y 3 áreas de crecimiento. Para cada una, integra en un mismo bloque: "
-        "la consideración (redactada con verbos como Revisar, Ajustar, Fomentar, Fortalecer, "
-        "Evaluar, Promover, Regular, Realizar), la evidencia que la sustenta (comentario o "
-        "puntaje específico) y la acción SMART sugerida (específica, medible, alcanzable, "
-        "relevante y temporal para la siguiente cohorte). Agrupa ideas similares, evita "
-        "repeticiones y mantén el lenguaje en clave de 'áreas de crecimiento', no de "
-        "'deficiencias'.\n\n"
-        "3. RUTA DE FORMACIÓN PERSONALIZADA\n"
-        "Con base en las áreas de crecimiento identificadas, diseña una ruta de formación de 2 a "
-        "3 pasos, ordenados de mayor a menor prioridad. Para cada paso indica: el recurso de "
-        "Aprende+ recomendado (nombre exacto, enlace y una frase que explique por qué es relevante "
-        "para este docente en particular), y qué habilidad o resultado de aprendizaje específico "
-        "del catálogo contribuye a resolver la necesidad detectada.\n\n"
+        "Eres un Diseñador Instruccional del Centro para la Excelencia en el Aprendizaje (EXA) "
+        "de la Universidad EAFIT. Recibes los resultados de la evaluación docente de un curso "
+        "y redactas la sección de Consideraciones del informe.\n\n"
+        f"Dirígete al docente directamente usando su nombre '{_pnombre}' y tuteándolo. "
+        f"Empieza el texto con '{_pnombre},' (solo el nombre, sin saludo ni protocolo). "
+        "El tono debe ser profesional y cercano — como el de un colega que acompaña, no el de "
+        "un evaluador que juzga. Nada de frases de cortesía como 'es un gusto compartir' o "
+        "'esperamos que esta retroalimentación sea de utilidad'. Ve directo al análisis.\n\n"
+        "Estructura el texto en exactamente tres bloques separados por párrafo vacío:\n\n"
+        "1. PANORAMA GENERAL Y FORTALEZAS (un solo párrafo, máx. 250 palabras)\n"
+        "Abre directamente con las fortalezas concretas del docente según los comentarios y "
+        "puntajes. Nombra 2 fortalezas específicas con evidencia. Cierra el párrafo anunciando "
+        "brevemente las áreas de crecimiento que se desarrollarán a continuación. "
+        "Todo en prosa fluida, sin viñetas ni subtítulos.\n\n"
+        "2. CONSIDERACIONES Y ACCIONES DE MEJORA (2 a 3 párrafos, uno por área de crecimiento)\n"
+        "Cada párrafo aborda una sola área. Empieza con un verbo de acción (Revisar, Ajustar, "
+        "Fomentar, Fortalecer, Evaluar, Promover, Regular, Realizar), luego la evidencia que lo "
+        "sustenta (comentario concreto o puntaje), y cierra con una acción SMART para la "
+        "siguiente cohorte. Sin viñetas. Sin subtítulos. Todo en prosa.\n\n"
+        "3. RUTA DE FORMACIÓN PERSONALIZADA (un párrafo introductorio + lista de 2 a 3 recursos)\n"
+        "Un párrafo breve que conecte las áreas de mejora con la ruta propuesta, seguido de "
+        "los recursos recomendados con nombre exacto, enlace y razón específica para este docente. "
+        "Usa ÚNICAMENTE los recursos del catálogo proporcionado. No inventes recursos ni enlaces.\n\n"
         "Usa ÚNICAMENTE los recursos del siguiente catálogo institucional:\n\n"
         "TRAYECTORIAS:\n"
         "① Diseño de Experiencias de Aprendizaje\n"
@@ -1123,12 +1113,64 @@ def generar_consideraciones_ia(token: str, info_informe: dict, contexto_docs: st
     return llamar_github_models(token, prompt_sistema, prompt_usuario, max_tokens=1500)
 
 
+def _crear_parrafo_consideracion(texto: str, fuente: str = "Calibri",
+                                  tam_pt: int = 11) -> etree._Element:
+    """
+    Crea un párrafo Word nuevo con:
+    - Texto justificado (jc = both)
+    - Espaciado después de párrafo: 160 twips (~8 pt) para separar bloques
+    - Sangría de primera línea: 720 twips (1.27 cm)
+    - Fuente y tamaño heredables de la plantilla (Calibri 11 por defecto)
+    - Sin viñetas ni listas
+    """
+    W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    XML_SP = "http://www.w3.org/XML/1998/namespace"
+
+    p = etree.Element(f"{{{W_NS}}}p")
+
+    # ── Propiedades de párrafo ──
+    pPr = etree.SubElement(p, f"{{{W_NS}}}pPr")
+
+    # Justificado
+    jc = etree.SubElement(pPr, f"{{{W_NS}}}jc")
+    jc.set(f"{{{W_NS}}}val", "both")
+
+    # Espaciado: 0 antes, 160 después (≈8 pt de separación entre párrafos)
+    spacing = etree.SubElement(pPr, f"{{{W_NS}}}spacing")
+    spacing.set(f"{{{W_NS}}}before", "0")
+    spacing.set(f"{{{W_NS}}}after", "160")
+    spacing.set(f"{{{W_NS}}}line", "276")      # interlineado 1.15
+    spacing.set(f"{{{W_NS}}}lineRule", "auto")
+
+    # Sangría primera línea (720 twips = 1.27 cm)
+    ind = etree.SubElement(pPr, f"{{{W_NS}}}ind")
+    ind.set(f"{{{W_NS}}}firstLine", "720")
+
+    # ── Run con el texto ──
+    r = etree.SubElement(p, f"{{{W_NS}}}r")
+
+    # Propiedades del run: fuente y tamaño
+    rPr = etree.SubElement(r, f"{{{W_NS}}}rPr")
+    rFonts = etree.SubElement(rPr, f"{{{W_NS}}}rFonts")
+    rFonts.set(f"{{{W_NS}}}ascii", fuente)
+    rFonts.set(f"{{{W_NS}}}hAnsi", fuente)
+    sz = etree.SubElement(rPr, f"{{{W_NS}}}sz")
+    sz.set(f"{{{W_NS}}}val", str(tam_pt * 2))   # Word usa half-points
+    szCs = etree.SubElement(rPr, f"{{{W_NS}}}szCs")
+    szCs.set(f"{{{W_NS}}}val", str(tam_pt * 2))
+
+    t_elem = etree.SubElement(r, f"{{{W_NS}}}t")
+    t_elem.text = texto
+    t_elem.set(f"{{{XML_SP}}}space", "preserve")
+
+    return p
+
+
 def insertar_consideraciones_en_docx(docx_bytes: bytes, texto_consideraciones: str) -> bytes:
     """
-    Localiza el título 'Consideraciones' en el documento (por texto, no por índice
-    fijo, ya que el índice varía según cuántos comentarios tenga cada informe) y
-    reemplaza los párrafos vacíos que le siguen con el texto generado, separado
-    en párrafos. No modifica ninguna otra parte del documento.
+    Localiza el título 'Consideraciones' en el documento y reemplaza los párrafos
+    vacíos que le siguen con párrafos justificados bien formateados.
+    Cada bloque separado por línea en blanco se convierte en un párrafo independiente.
     """
     tree = etree.fromstring(
         zipfile.ZipFile(io.BytesIO(docx_bytes)).read('word/document.xml')
@@ -1144,8 +1186,7 @@ def insertar_consideraciones_en_docx(docx_bytes: bytes, texto_consideraciones: s
         raise RuntimeError("No se encontró la sección 'Consideraciones' en este informe. "
                            "Verifica que el archivo subido sea un informe generado por esta app.")
 
-    # Buscar el siguiente párrafo con texto real (ej. "Aspectos formativos") para
-    # saber hasta dónde van los párrafos vacíos que se pueden usar/reemplazar.
+    # Buscar hasta dónde van los huecos vacíos después del título
     idx_siguiente_con_texto = None
     for j in range(idx_titulo + 1, len(children)):
         if texto_de(children[j]):
@@ -1154,42 +1195,22 @@ def insertar_consideraciones_en_docx(docx_bytes: bytes, texto_consideraciones: s
     if idx_siguiente_con_texto is None:
         idx_siguiente_con_texto = len(children)
 
-    # Párrafos vacíos disponibles entre el título y el siguiente contenido
     huecos = children[idx_titulo + 1: idx_siguiente_con_texto]
-    if not huecos:
-        # No hay párrafos vacíos de plantilla; se crea uno nuevo como referencia de estilo
-        template_para = children[idx_titulo]
-    else:
-        template_para = huecos[0]
+    insert_pos = (list(body).index(huecos[0]) if huecos
+                  else list(body).index(children[idx_titulo]) + 1)
 
-    insert_pos = list(body).index(huecos[0]) if huecos else list(body).index(children[idx_titulo]) + 1
-
-    # Quitar los huecos vacíos existentes
+    # Eliminar huecos vacíos existentes
     for h in huecos:
         body.remove(h)
 
-    # Insertar un párrafo por cada bloque de texto (separado por saltos de línea dobles)
+    # Partir el texto en párrafos (doble salto de línea = separador de bloque)
     parrafos_nuevos = [p.strip() for p in re.split(r"\n\s*\n", texto_consideraciones) if p.strip()]
     if not parrafos_nuevos:
         parrafos_nuevos = [texto_consideraciones.strip()]
 
+    # Insertar cada párrafo correctamente formateado
     for k, parrafo in enumerate(parrafos_nuevos):
-        nuevo_p = clone_bullet_para(template_para) if huecos else deepcopy(template_para)
-        # Limpiar estilo de viñeta/lista si el template_para tuviera uno (no aplica aquí,
-        # pero por seguridad se elimina cualquier numPr heredado)
-        for numPr in nuevo_p.findall('.//' + W + 'numPr'):
-            numPr.getparent().remove(numPr)
-        all_ts = list(nuevo_p.iter(W + 't'))
-        if all_ts:
-            all_ts[0].text = parrafo
-            all_ts[0].set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
-            for t in all_ts[1:]:
-                t.text = ''
-        else:
-            r = etree.SubElement(nuevo_p, W + 'r')
-            t = etree.SubElement(r, W + 't')
-            t.text = parrafo
-            t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+        nuevo_p = _crear_parrafo_consideracion(parrafo)
         body.insert(insert_pos + k, nuevo_p)
 
     new_xml = etree.tostring(tree, xml_declaration=True, encoding='UTF-8', standalone=True)
