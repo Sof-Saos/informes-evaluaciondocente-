@@ -519,8 +519,117 @@ def generar_informe_bytes(nombre: str, datos: dict,
             body.insert(insert_pos + j, new_p)
 
     # ── Consideraciones: limpiar el placeholder {Comentario parrafo} ──
-    # Se deja vacío aquí; el módulo de IA lo rellena después si se usa
     reemplazar(body, '{Comentario parrafo}', '')
+
+    # ── POST-PROCESO: ajustes de estilo ──────────────────────────────────────
+
+    # Cambio 3: Tabla estudiantes — igualar fuente sz=18 y alineación center en ambas filas
+    for child in list(body):
+        if child.tag != W+'tbl':
+            continue
+        if 'estudiantes' not in texto_de(child).lower():
+            continue
+        for row in child.findall('.//' + W+'tr'):
+            cells = row.findall(W+'tc')
+            if len(cells) < 2:
+                continue
+            cell_valor = cells[1]
+            # Asegurar párrafo con alineación centrada
+            for p in cell_valor.findall('.//' + W+'p'):
+                pPr = p.find(W+'pPr')
+                if pPr is None:
+                    pPr = etree.SubElement(p, W+'pPr')
+                    p.insert(0, pPr)
+                jc = pPr.find(W+'jc')
+                if jc is None:
+                    jc = etree.SubElement(pPr, W+'jc')
+                jc.set(W+'val', 'center')
+            # Asegurar sz=18 en todos los runs de la celda valor
+            for r in cell_valor.findall('.//' + W+'r'):
+                rPr = r.find(W+'rPr')
+                if rPr is None:
+                    rPr = etree.Element(W+'rPr')
+                    r.insert(0, rPr)
+                for tag in [W+'sz', W+'szCs']:
+                    el = rPr.find(tag)
+                    if el is None:
+                        el = etree.SubElement(rPr, tag)
+                    el.set(W+'val', '18')
+        break
+
+    # Cambio 4: Tabla competencias — ampliar para que "Relacional (Calidad Humana)" quede en un renglón
+    for child in list(body):
+        if child.tag != W+'tbl':
+            continue
+        if 'competencias' not in texto_de(child).lower():
+            continue
+        # Ampliar ancho total de la tabla
+        tblPr = child.find(W+'tblPr')
+        if tblPr is not None:
+            tblW = tblPr.find(W+'tblW')
+            if tblW is None:
+                tblW = etree.SubElement(tblPr, W+'tblW')
+            tblW.set(W+'w', '4600')
+            tblW.set(W+'type', 'dxa')
+        # Ajustar anchos de cada celda
+        for row in child.findall('.//' + W+'tr'):
+            cells = row.findall(W+'tc')
+            if len(cells) < 2:
+                continue
+            for ci, (cell, new_w) in enumerate(zip(cells, ['3800', '800'])):
+                tcPr = cell.find(W+'tcPr')
+                if tcPr is None:
+                    tcPr = etree.SubElement(cell, W+'tcPr')
+                    cell.insert(0, tcPr)
+                tcW = tcPr.find(W+'tcW')
+                if tcW is None:
+                    tcW = etree.SubElement(tcPr, W+'tcW')
+                tcW.set(W+'w', new_w)
+                tcW.set(W+'type', 'dxa')
+        break
+
+    # Cambio 5: Estilos de sección de comentarios
+    # "Preguntas abiertas" → azul EAFIT (#0B4DFF), bold
+    # Títulos de cada sección (Menciona positivo / Menciona mejorar / ¿Tienes algún...) → bold
+    COLOR_AZUL = '0B4DFF'
+    for child in list(body):
+        t = texto_de(child)
+        if t == 'Preguntas abiertas':
+            for r in child.findall('.//' + W+'r'):
+                rPr = r.find(W+'rPr')
+                if rPr is None:
+                    rPr = etree.Element(W+'rPr')
+                    r.insert(0, rPr)
+                # Bold
+                if rPr.find(W+'b') is None:
+                    etree.SubElement(rPr, W+'b')
+                # Color azul
+                color_el = rPr.find(W+'color')
+                if color_el is None:
+                    color_el = etree.SubElement(rPr, W+'color')
+                color_el.set(W+'val', COLOR_AZUL)
+        elif any(frag in t.lower() for frag in ['menciona un aspecto', '¿tienes algún comentario']):
+            for r in child.findall('.//' + W+'r'):
+                rPr = r.find(W+'rPr')
+                if rPr is None:
+                    rPr = etree.Element(W+'rPr')
+                    r.insert(0, rPr)
+                if rPr.find(W+'b') is None:
+                    etree.SubElement(rPr, W+'b')
+
+    # Cambio 6: Quitar bullet point (numPr) de Modalidad, manteniendo estilo visual idéntico
+    # a los otros ítems de la lista (indentación de ListParagraph pero sin bullet)
+    modalidad_idx = next((i for i, c in enumerate(list(body))
+                          if 'Modalidad:' in texto_de(c)), None)
+    if modalidad_idx is not None:
+        child = list(body)[modalidad_idx]
+        pPr = child.find(W+'pPr')
+        if pPr is not None:
+            # Solo quitar numPr — mantener estilo ListParagraph e indentación
+            # para que quede visualmente igual pero sin el bullet
+            numPr = pPr.find(W+'numPr')
+            if numPr is not None:
+                pPr.remove(numPr)
 
     # ── Empaquetar ──
 
@@ -784,9 +893,8 @@ def extraer_texto_referencia(nombre_archivo: str, contenido: bytes) -> str:
 
 def extraer_texto_informe_actual(docx_bytes: bytes) -> dict:
     """
-    Extrae del informe .docx ya generado: nombre del profesor, curso, escuela,
-    comentarios por sección, y el contenido actual de Consideraciones (si lo hay).
-    Esto le da contexto al modelo sobre QUÉ profesor/curso es y qué se dijo de él.
+    Extrae del informe .docx: portada, comentarios, puntajes de competencias
+    y estado de la sección Consideraciones.
     """
     tree = etree.fromstring(
         zipfile.ZipFile(io.BytesIO(docx_bytes)).read('word/document.xml')
@@ -798,13 +906,35 @@ def extraer_texto_informe_actual(docx_bytes: bytes) -> dict:
         return "".join(t.text or "" for t in elem.iter(W + 't')).strip()
 
     textos = [texto_de(c) for c in children]
-    texto_completo = "\n".join(t for t in textos if t)
 
-    # Portada: primer párrafo trae curso/escuela/semestre/nombre concatenados
-    portada = textos[0] if textos else ""
+    # Portada: buscar párrafos que empiecen con los labels conocidos
+    labels_portada = ["Nombre del curso", "Nombre del programa", "Código curso",
+                      "Semestre", "Modalidad", "Nombre profesor", "Tasa de respuesta"]
+    portada_lineas = []
+    for t in textos:
+        if any(t.startswith(lbl) for lbl in labels_portada):
+            portada_lineas.append(t)
+    portada = "\n".join(portada_lineas) if portada_lineas else (textos[0] if textos else "")
 
-    # Comentarios: todo lo que está entre las preguntas conocidas y "Consideraciones"
-    idx_consideraciones = next((i for i, t in enumerate(textos) if t.strip().rstrip("\xa0 ") == "Consideraciones"), None)
+    # Competencias: buscar en tabla (texto con "Competencias evaluadas")
+    competencias_lineas = []
+    for child in children:
+        if child.tag == W + 'tbl':
+            tbl_text = texto_de(child)
+            if 'competencias' in tbl_text.lower():
+                for row in child.findall('.//' + W + 'tr')[1:]:
+                    cells = row.findall(W + 'tc')
+                    if len(cells) >= 2:
+                        nombre_c = texto_de(cells[0]).rstrip('\xa0\u202f').strip()
+                        nota_c   = texto_de(cells[1]).strip()
+                        if nombre_c and nota_c:
+                            competencias_lineas.append(f"{nombre_c}: {nota_c}")
+                break
+    competencias_txt = "\n".join(competencias_lineas)
+
+    # Comentarios
+    idx_consideraciones = next((i for i, t in enumerate(textos)
+                                if t.strip().rstrip("\xa0 ") == "Consideraciones"), None)
     comentarios_texto = []
     capturando = False
     for t in textos:
@@ -818,7 +948,8 @@ def extraer_texto_informe_actual(docx_bytes: bytes) -> dict:
             comentarios_texto.append(t)
 
     return {
-        "portada": portada,
+        "portada":    portada,
+        "competencias": competencias_txt,
         "comentarios": "\n".join(comentarios_texto),
         "tiene_consideraciones_idx": idx_consideraciones is not None,
     }
@@ -862,41 +993,110 @@ def llamar_github_models(token: str, prompt_sistema: str, prompt_usuario: str,
 
 def generar_consideraciones_ia(token: str, info_informe: dict, contexto_docs: str,
                                 instruccion_usuaria: str = "") -> str:
-    """Construye los prompts y pide al modelo la sección de Consideraciones reescrita."""
+    """Construye los prompts institucionales EXA y pide al modelo la sección de Consideraciones."""
     prompt_sistema = (
-        "Eres un asistente experto en evaluación docente y formación pedagógica universitaria. "
-        "Tu única tarea es redactar la sección 'Consideraciones' de un informe individual de "
-        "evaluación docente, en español, con tono profesional, constructivo y respetuoso. "
-        "Debes basarte en la estructura, criterios, tono y lenguaje de los documentos de "
-        "referencia institucionales que se te proporcionan (formaciones EXA, protocolos, "
-        "lineamientos). No inventes datos, cifras o citas que no estén en el contexto. "
-        "No incluyas encabezados ni títulos (el título 'Consideraciones' ya existe en el "
-        "documento), entrega solo el cuerpo del texto, en párrafos claros y bien estructurados. "
-        "No uses viñetas a menos que el documento de referencia lo sugiera explícitamente."
+        "Actúa como un Diseñador Instruccional experto del Centro para la Excelencia en el "
+        "Aprendizaje (EXA) de la Universidad EAFIT. Tu objetivo es analizar los resultados de "
+        "la evaluación docente de un curso virtual o híbrido y generar una retroalimentación "
+        "formativa, estratégica y empática, basada en el protocolo institucional, dirigiéndote "
+        "en todo momento al docente de manera directa (usando el 'tú' de forma cercana pero "
+        "profesional). Al final, construirás una ruta de formación personalizada usando "
+        "exclusivamente el catálogo de Aprende+ que se detalla más adelante.\n\n"
+        "INSTRUCCIONES DE TAREA:\n"
+        "Analiza los datos anteriores bajo los principios de feedforward y evaluación integral. "
+        "Genera un informe formativo con las siguientes secciones:\n\n"
+        "1. PANORAMA GENERAL Y FORTALEZAS (máx. 300 palabras — un solo párrafo)\n"
+        "Redacta un único párrafo narrativo que cumpla las dos funciones a la vez: abre con un "
+        "reconocimiento cordial y concreto de sus principales fortalezas, basadas en los "
+        "comentarios de los estudiantes y los datos cuantitativos; luego, en continuidad fluida, "
+        "ofrece una síntesis interpretativa del panorama general del desempeño. Destaca 2 de sus "
+        "fortalezas y anuncia con lenguaje constructivo las 2-3 áreas que se abordarán a "
+        "continuación. Usa un tono profesional, empático y de acompañamiento — nunca de juicio. "
+        "Evita viñetas; todo debe fluir como prosa.\n\n"
+        "2. CONSIDERACIONES Y ACCIONES DE MEJORA\n"
+        "Presenta entre 2 y 3 áreas de crecimiento. Para cada una, integra en un mismo bloque: "
+        "la consideración (redactada con verbos como Revisar, Ajustar, Fomentar, Fortalecer, "
+        "Evaluar, Promover, Regular, Realizar), la evidencia que la sustenta (comentario o "
+        "puntaje específico) y la acción SMART sugerida (específica, medible, alcanzable, "
+        "relevante y temporal para la siguiente cohorte). Agrupa ideas similares, evita "
+        "repeticiones y mantén el lenguaje en clave de 'áreas de crecimiento', no de 'deficiencias'.\n\n"
+        "3. RUTA DE FORMACIÓN PERSONALIZADA\n"
+        "Con base en las áreas de crecimiento identificadas, diseña una ruta de formación de 2 a "
+        "3 pasos, ordenados de mayor a menor prioridad. Para cada paso indica: el recurso de "
+        "Aprende+ recomendado (nombre exacto, enlace y una frase que explique por qué es relevante "
+        "para este docente en particular), y qué habilidad o resultado de aprendizaje específico "
+        "del catálogo contribuye a resolver la necesidad detectada.\n\n"
+        "Usa ÚNICAMENTE los recursos del siguiente catálogo institucional:\n\n"
+        "TRAYECTORIAS:\n"
+        "① Diseño de Experiencias de Aprendizaje\n"
+        "   → Competencia: diseñar y liderar secuencias didácticas con el Ciclo de Kolb.\n"
+        "   → Úsala cuando: el docente necesita estructurar mejor sus actividades, diversificar "
+        "metodologías o promover la participación y autonomía del estudiante.\n\n"
+        "② Trayectoria Innovación\n"
+        "   → Competencia: aplicar herramientas de innovación, creatividad y metodologías ágiles.\n"
+        "   → Úsala cuando: el docente busca renovar su práctica con enfoques más creativos o ágiles.\n\n"
+        "③ Trayectoria Inteligencia Artificial\n"
+        "   → Competencia: integrar IA para optimizar diseño de recursos, automatizar procesos y "
+        "mejorar eficiencia.\n"
+        "   → Úsala cuando: el docente necesita mejorar su gestión de recursos digitales o quiere "
+        "innovar con IA en el aula.\n\n"
+        "CURSOS INDIVIDUALES:\n"
+        "④ Diseño de Syllabus y Rúbricas para la Evaluación del Aprendizaje\n"
+        "   Enlace: https://interactivavirtual.eafit.edu.co/d2l/le/discovery/view/course/143311\n"
+        "   → Úsalo cuando: hay debilidad en claridad de criterios de evaluación o estructura del curso.\n\n"
+        "⑤ Metodología del Ciclo de Kolb\n"
+        "   Enlace: https://interactivavirtual.eafit.edu.co/d2l/le/discovery/view/course/130033\n"
+        "   → Úsalo cuando: el docente requiere una introducción al aprendizaje experiencial antes "
+        "de abordar la trayectoria completa.\n\n"
+        "⑥ Evaluación del Aprendizaje\n"
+        "   Enlace: https://interactivavirtual.eafit.edu.co/d2l/le/discovery/view/course/184752\n"
+        "   → Úsalo cuando: se detecta debilidad en estrategias de evaluación, retroalimentación "
+        "o seguimiento del aprendizaje.\n\n"
+        "⑦ Aprendizaje Basado en Retos (ABR)\n"
+        "   Enlace: https://interactivavirtual.eafit.edu.co/d2l/le/discovery/view/course/134289\n"
+        "   → Úsalo cuando: el docente quiere incorporar metodologías activas que promuevan "
+        "pensamiento crítico y colaboración.\n\n"
+        "⑧ Aprendizaje Basado en Proyectos (ABP)\n"
+        "   Enlace: https://interactivavirtual.eafit.edu.co/d2l/le/discovery/view/course/127810\n"
+        "   → Úsalo cuando: el docente quiere que los estudiantes aprendan resolviendo situaciones "
+        "reales mediante proyectos colaborativos.\n\n"
+        "⑨ El Pacto Pedagógico\n"
+        "   Enlace: https://interactivavirtual.eafit.edu.co/d2l/le/discovery/view/course/202260\n"
+        "   → Úsalo cuando: se detectan problemas de comunicación, acuerdos de convivencia o "
+        "compromiso entre docente y estudiantes.\n\n"
+        "No inventes recursos ni enlaces. Si ningún recurso del catálogo se ajusta a una necesidad "
+        "detectada, indícalo explícitamente.\n\n"
+        "PRINCIPIOS DE REDACCIÓN:\n"
+        "- Objetivo formativo: énfasis en 'áreas de crecimiento', no en 'deficiencias'.\n"
+        "- Feedforward: orienta hacia acciones futuras, no hacia errores del pasado.\n"
+        "- Equilibrio: lo positivo siempre antes que las oportunidades de mejora.\n"
+        "- Tono profesional, respetuoso y de acompañamiento (nunca de juicio).\n"
+        "- Coherencia, buena gramática y puntuación en todo el texto.\n"
+        "- Sin redundancias ni extensiones innecesarias.\n"
+        "- Usa SOLO los recursos del catálogo proporcionado; no inventes ni agregues otros."
     )
 
     partes_usuario = [
-        f"INFORMACIÓN DEL CURSO Y PROFESOR (portada del informe):\n{info_informe['portada']}\n",
-        f"COMENTARIOS DE ESTUDIANTES RECOPILADOS EN LA EVALUACIÓN:\n{info_informe['comentarios'] or '(sin comentarios registrados)'}\n",
+        f"INFORMACIÓN DEL CURSO Y PROFESOR:\n{info_informe['portada']}\n",
+        f"COMENTARIOS DE ESTUDIANTES:\n{info_informe['comentarios'] or '(sin comentarios registrados)'}\n",
+        f"PUNTAJES POR COMPETENCIA:\n{info_informe.get('competencias', '(no disponibles)')}\n",
     ]
     if contexto_docs:
-        partes_usuario.append(f"DOCUMENTOS DE REFERENCIA INSTITUCIONALES (usar como guía de estructura, tono y criterios):\n{contexto_docs}\n")
+        partes_usuario.append(f"DOCUMENTOS DE REFERENCIA INSTITUCIONALES:\n{contexto_docs}\n")
     if instruccion_usuaria.strip():
-        partes_usuario.append(f"INDICACIÓN ADICIONAL DE QUIEN ELABORA EL INFORME:\n{instruccion_usuaria.strip()}\n")
+        partes_usuario.append(f"INDICACIÓN ADICIONAL:\n{instruccion_usuaria.strip()}\n")
 
     partes_usuario.append(
-        "Con base en lo anterior, redacta la sección 'Consideraciones' del informe: una síntesis "
-        "constructiva del desempeño docente, con observaciones y recomendaciones claras y "
-        "accionables, alineada con los documentos de referencia. Extensión sugerida: 2 a 4 párrafos."
+        "Con base en lo anterior, genera el informe formativo completo con las tres secciones "
+        "descritas: PANORAMA GENERAL Y FORTALEZAS, CONSIDERACIONES Y ACCIONES DE MEJORA, "
+        "y RUTA DE FORMACIÓN PERSONALIZADA."
     )
 
     prompt_usuario = "\n".join(partes_usuario)
-
-    # Recortar el contexto si excede el límite del tier gratuito
     if len(prompt_usuario) > MAX_CHARS_CONTEXTO:
         prompt_usuario = prompt_usuario[:MAX_CHARS_CONTEXTO] + "\n[...contexto recortado por límite de tokens...]"
 
-    return llamar_github_models(token, prompt_sistema, prompt_usuario)
+    return llamar_github_models(token, prompt_sistema, prompt_usuario, max_tokens=1500)
 
 
 def insertar_consideraciones_en_docx(docx_bytes: bytes, texto_consideraciones: str) -> bytes:
@@ -1921,6 +2121,10 @@ if PAGINA == "consideraciones":
         st.info("📄 Sube el informe (.docx) generado por la app para continuar.")
 
     if (generar_clic or regenerar_clic) and informe_bytes_base is not None:
+        # Limpiar estado del informe anterior para evitar contaminación entre generaciones
+        st.session_state.consideraciones_texto = ""
+        st.session_state.consideraciones_docx_bytes = None
+        st.session_state.consideraciones_nombre_archivo = None
         try:
             with st.spinner("Leyendo el informe y los documentos guía…"):
                 informe_bytes = informe_bytes_base
