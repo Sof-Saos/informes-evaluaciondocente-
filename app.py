@@ -450,35 +450,17 @@ def generar_informe_bytes(nombre: str, datos: dict,
     elif p_spider is not None:
         reemplazar(p_spider, '{{Spider_diagram}}', '')
 
-    # ── Tabla competencias: llenar {note} por fila según el nombre de la competencia ──
-    COMP_MAP = {
-        "índice de recomendación":     "Índice de recomendación",
-        "pacto pedagógico":            "Pacto Pedagógico",
-        "pedagógica":                  "Pedagógica",
-        "relacional (calidad humana)": "Relacional (Calidad Humana)",
-        "relacional (respeto)":        "Relacional (Respeto)",
-    }
-    nota_final_curso = nota_curso if nota_curso else nota_final
-
+    # ── Tabla competencias: eliminar (reemplazada por el diagrama de araña) ──
     for child in list(body):
         if child.tag != W+'tbl':
             continue
-        header = texto_de(list(child.findall('.//' + W+'tr'))[0])
+        rows_tbl = child.findall('.//' + W+'tr')
+        if not rows_tbl:
+            continue
+        header = texto_de(rows_tbl[0])
         if 'competencias' not in header.lower():
             continue
-        for row in child.findall('.//' + W+'tr')[1:]:
-            cells = row.findall(W+'tc')
-            if len(cells) < 2:
-                continue
-            nombre_comp = texto_de(cells[0]).rstrip('\xa0\u202f').strip().lower()
-            clave       = COMP_MAP.get(nombre_comp)
-            if clave and clave in notas_comp_raw:
-                valor = fmt_nota(notas_comp_raw[clave])
-            elif 'nota final' in nombre_comp or 'final del curso' in nombre_comp:
-                valor = fmt_nota(nota_final_curso) if nota_final_curso else '—'
-            else:
-                valor = '—'
-            reemplazar(cells[1], '{note}', valor)
+        body.remove(child)
         break
 
     # ── Comentarios: reemplazar {Comentario} (con viñeta heredada del template) ──
@@ -845,8 +827,8 @@ def _spider_chart_png(notas: dict) -> bytes:
 # aspectos formativos, firma) no se toca en absoluto.
 
 GITHUB_MODELS_URL   = "https://models.github.ai/inference/chat/completions"
-GITHUB_MODELS_MODEL = "openai/gpt-4o-mini"
-MAX_CHARS_CONTEXTO  = 24000   # ~6000-8000 tokens aprox., margen para el tier "Low"
+GITHUB_MODELS_MODEL = "openai/gpt-4o"
+MAX_CHARS_CONTEXTO  = 24000   # ~6000-8000 tokens aprox.
 
 def extraer_texto_referencia(nombre_archivo: str, contenido: bytes) -> str:
     """Extrae texto plano de un archivo de referencia (.pdf, .docx, .txt)."""
@@ -947,9 +929,9 @@ def extraer_texto_informe_actual(docx_bytes: bytes) -> dict:
 
 
 def llamar_github_models(token: str, prompt_sistema: str, prompt_usuario: str,
-                          max_tokens: int = 900, temperature: float = 0.4) -> str:
+                          max_tokens: int = 1500, temperature: float = 0.4) -> str:
     """
-    Llama a GitHub Models (chat completions) y devuelve el texto de la respuesta.
+    Llama a GitHub Models (chat completions) con gpt-4o y devuelve el texto de la respuesta.
     Lanza una excepción con mensaje claro si falla (token inválido, rate limit, etc.)
     """
     payload = {
@@ -968,7 +950,7 @@ def llamar_github_models(token: str, prompt_sistema: str, prompt_usuario: str,
         "Accept": "application/vnd.github+json",
     })
     try:
-        with _urlreq.urlopen(req, timeout=60) as r:
+        with _urlreq.urlopen(req, timeout=90) as r:
             resultado = _json.loads(r.read())
         return resultado["choices"][0]["message"]["content"].strip()
     except _urlerr.HTTPError as e:
