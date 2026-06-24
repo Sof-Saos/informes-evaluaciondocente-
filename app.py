@@ -928,6 +928,51 @@ def extraer_texto_informe_actual(docx_bytes: bytes) -> dict:
     }
 
 
+
+
+def _primer_nombre(nombre_completo: str) -> str:
+    """Extrae el primer nombre del docente (los apellidos suelen ir primero en EAFIT)."""
+    partes = nombre_completo.strip().split()
+    # Heurística: si hay 4+ palabras, los dos primeros son apellidos → tercer es nombre
+    # Si hay 3, el primero es apellido → segundo es nombre
+    # Si hay 2, el primero es apellido → segundo es nombre
+    # Si hay 1, usar tal cual
+    if len(partes) >= 4:
+        return partes[2].capitalize()
+    elif len(partes) == 3:
+        return partes[1].capitalize()
+    elif len(partes) == 2:
+        return partes[1].capitalize()
+    return partes[0].capitalize() if partes else "Docente"
+
+
+def _detectar_genero(nombre_completo: str) -> str:
+    """
+    Devuelve 'M' o 'F' según terminación del primer nombre.
+    Heurística simple: nombres terminados en 'a' (excepto excepciones) → femenino.
+    """
+    primer = _primer_nombre(nombre_completo).lower().rstrip(".")
+    masculinos = {"luca", "nicola", "andrea", "bautista", "elias", "tobias",
+                  "matias", "jeremias", "ezequias", "isaias", "josua", "josias",
+                  "elia", "garcia"}
+    femeninos_exc = set()
+    if primer in masculinos:
+        return "M"
+    if primer.endswith("a") or primer.endswith("e"):
+        return "F"
+    return "M"
+
+
+def _tratamiento(nombre_completo: str) -> tuple[str, str, str]:
+    """
+    Retorna (tratamiento, primer_nombre, genero)
+    Ej: ("Profesora", "Laura", "F")
+    """
+    genero = _detectar_genero(nombre_completo)
+    trat   = "Profesora" if genero == "F" else "Profesor"
+    primer = _primer_nombre(nombre_completo)
+    return trat, primer, genero
+
 def llamar_github_models(token: str, prompt_sistema: str, prompt_usuario: str,
                           max_tokens: int = 1500, temperature: float = 0.4) -> str:
     """
@@ -966,88 +1011,13 @@ def llamar_github_models(token: str, prompt_sistema: str, prompt_usuario: str,
 
 def generar_consideraciones_ia(token: str, info_informe: dict, contexto_docs: str,
                                 instruccion_usuaria: str = "") -> str:
-    """Construye los prompts institucionales EXA y pide al modelo la sección de Consideraciones."""
+    """Construye los prompts y llama al modelo con el prompt del usuario como instrucción principal."""
     prompt_sistema = (
-        "Actúa como un Diseñador Instruccional experto del Centro para la Excelencia en el "
-        "Aprendizaje (EXA) de la Universidad EAFIT. Tu objetivo es analizar los resultados de "
-        "la evaluación docente de un curso virtual o híbrido y generar una retroalimentación "
-        "formativa, estratégica y empática, basada en el protocolo institucional, dirigiéndote "
-        "en todo momento al docente de manera directa (usando el 'tú' de forma cercana pero "
-        "profesional). Al final, construirás una ruta de formación personalizada usando "
-        "exclusivamente el catálogo de Aprende+ que se detalla más adelante.\n\n"
-        "INSTRUCCIONES DE TAREA:\n"
-        "Analiza los datos anteriores bajo los principios de feedforward y evaluación integral. "
-        "Genera un informe formativo con las siguientes secciones:\n\n"
-        "1. PANORAMA GENERAL Y FORTALEZAS (máx. 300 palabras — un solo párrafo)\n"
-        "Redacta un único párrafo narrativo que cumpla las dos funciones a la vez: abre con un "
-        "reconocimiento cordial y concreto de sus principales fortalezas, basadas en los "
-        "comentarios de los estudiantes y los datos cuantitativos; luego, en continuidad fluida, "
-        "ofrece una síntesis interpretativa del panorama general del desempeño. Destaca 2 de sus "
-        "fortalezas y anuncia con lenguaje constructivo las 2-3 áreas que se abordarán a "
-        "continuación. Usa un tono profesional, empático y de acompañamiento — nunca de juicio. "
-        "Evita viñetas; todo debe fluir como prosa.\n\n"
-        "2. CONSIDERACIONES Y ACCIONES DE MEJORA\n"
-        "Presenta entre 2 y 3 áreas de crecimiento. Para cada una, integra en un mismo bloque: "
-        "la consideración (redactada con verbos como Revisar, Ajustar, Fomentar, Fortalecer, "
-        "Evaluar, Promover, Regular, Realizar), la evidencia que la sustenta (comentario o "
-        "puntaje específico) y la acción SMART sugerida (específica, medible, alcanzable, "
-        "relevante y temporal para la siguiente cohorte). Agrupa ideas similares, evita "
-        "repeticiones y mantén el lenguaje en clave de 'áreas de crecimiento', no de 'deficiencias'.\n\n"
-        "3. RUTA DE FORMACIÓN PERSONALIZADA\n"
-        "Con base en las áreas de crecimiento identificadas, diseña una ruta de formación de 2 a "
-        "3 pasos, ordenados de mayor a menor prioridad. Para cada paso indica: el recurso de "
-        "Aprende+ recomendado (nombre exacto, enlace y una frase que explique por qué es relevante "
-        "para este docente en particular), y qué habilidad o resultado de aprendizaje específico "
-        "del catálogo contribuye a resolver la necesidad detectada.\n\n"
-        "Usa ÚNICAMENTE los recursos del siguiente catálogo institucional:\n\n"
-        "TRAYECTORIAS:\n"
-        "① Diseño de Experiencias de Aprendizaje\n"
-        "   → Competencia: diseñar y liderar secuencias didácticas con el Ciclo de Kolb.\n"
-        "   → Úsala cuando: el docente necesita estructurar mejor sus actividades, diversificar "
-        "metodologías o promover la participación y autonomía del estudiante.\n\n"
-        "② Trayectoria Innovación\n"
-        "   → Competencia: aplicar herramientas de innovación, creatividad y metodologías ágiles.\n"
-        "   → Úsala cuando: el docente busca renovar su práctica con enfoques más creativos o ágiles.\n\n"
-        "③ Trayectoria Inteligencia Artificial\n"
-        "   → Competencia: integrar IA para optimizar diseño de recursos, automatizar procesos y "
-        "mejorar eficiencia.\n"
-        "   → Úsala cuando: el docente necesita mejorar su gestión de recursos digitales o quiere "
-        "innovar con IA en el aula.\n\n"
-        "CURSOS INDIVIDUALES:\n"
-        "④ Diseño de Syllabus y Rúbricas para la Evaluación del Aprendizaje\n"
-        "   Enlace: https://interactivavirtual.eafit.edu.co/d2l/le/discovery/view/course/143311\n"
-        "   → Úsalo cuando: hay debilidad en claridad de criterios de evaluación o estructura del curso.\n\n"
-        "⑤ Metodología del Ciclo de Kolb\n"
-        "   Enlace: https://interactivavirtual.eafit.edu.co/d2l/le/discovery/view/course/130033\n"
-        "   → Úsalo cuando: el docente requiere una introducción al aprendizaje experiencial antes "
-        "de abordar la trayectoria completa.\n\n"
-        "⑥ Evaluación del Aprendizaje\n"
-        "   Enlace: https://interactivavirtual.eafit.edu.co/d2l/le/discovery/view/course/184752\n"
-        "   → Úsalo cuando: se detecta debilidad en estrategias de evaluación, retroalimentación "
-        "o seguimiento del aprendizaje.\n\n"
-        "⑦ Aprendizaje Basado en Retos (ABR)\n"
-        "   Enlace: https://interactivavirtual.eafit.edu.co/d2l/le/discovery/view/course/134289\n"
-        "   → Úsalo cuando: el docente quiere incorporar metodologías activas que promuevan "
-        "pensamiento crítico y colaboración.\n\n"
-        "⑧ Aprendizaje Basado en Proyectos (ABP)\n"
-        "   Enlace: https://interactivavirtual.eafit.edu.co/d2l/le/discovery/view/course/127810\n"
-        "   → Úsalo cuando: el docente quiere que los estudiantes aprendan resolviendo situaciones "
-        "reales mediante proyectos colaborativos.\n\n"
-        "⑨ El Pacto Pedagógico\n"
-        "   Enlace: https://interactivavirtual.eafit.edu.co/d2l/le/discovery/view/course/202260\n"
-        "   → Úsalo cuando: se detectan problemas de comunicación, acuerdos de convivencia o "
-        "compromiso entre docente y estudiantes.\n\n"
-        "No inventes recursos ni enlaces. Si ningún recurso del catálogo se ajusta a una necesidad "
-        "detectada, indícalo explícitamente.\n\n"
-        "PRINCIPIOS DE REDACCIÓN:\n"
-        "- Objetivo formativo: énfasis en 'áreas de crecimiento', no en 'deficiencias'.\n"
-        "- Feedforward: orienta hacia acciones futuras, no hacia errores del pasado.\n"
-        "- Equilibrio: lo positivo siempre antes que las oportunidades de mejora.\n"
-        "- Tono profesional, respetuoso y de acompañamiento (nunca de juicio).\n"
-        "- Coherencia, buena gramática y puntuación en todo el texto.\n"
-        "- Sin redundancias ni extensiones innecesarias.\n"
-        "- Usa SOLO los recursos del catálogo proporcionado; no inventes ni agregues otros."
+        "Eres un asistente del Centro para la Excelencia en el Aprendizaje (EXA) de la "
+        "Universidad EAFIT. Sigue exactamente las instrucciones que te da el usuario. "
+        "Responde siempre en español, con tono profesional, empático y formativo."
     )
+
 
     partes_usuario = [
         f"INFORMACIÓN DEL CURSO Y PROFESOR:\n{info_informe['portada']}\n",
@@ -2077,23 +2047,120 @@ if PAGINA == "consideraciones":
         unsafe_allow_html=True
     )
 
+    # ── Detectar nombre y género del docente desde el informe subido ──
+    _nombre_docente_raw = ""
+    if informe_bytes_base is not None:
+        try:
+            _info_tmp = extraer_texto_informe_actual(informe_bytes_base)
+            for linea in _info_tmp.get("portada", "").splitlines():
+                if "Nombre profesor" in linea or "profesor" in linea.lower():
+                    partes_linea = linea.split(":", 1)
+                    if len(partes_linea) == 2:
+                        _nombre_docente_raw = partes_linea[1].strip()
+                        break
+        except Exception:
+            pass
+
+    if _nombre_docente_raw:
+        _trat, _pnombre, _genero = _tratamiento(_nombre_docente_raw)
+        _saludo = f"{_trat} {_pnombre}"
+        _el_la  = "la" if _genero == "F" else "el"
+        _del_la = "de la" if _genero == "F" else "del"
+        _titulo = "Profesora" if _genero == "F" else "Profesor"
+    else:
+        _saludo = "Profesor/a"
+        _el_la  = "el/la"
+        _del_la = "del/de la"
+        _titulo = "Profesor/a"
+
     PROMPT_BASE_USUARIO = (
-        "Redacta la sección 'Consideraciones' del informe de evaluación docente. "
-        "Debe ser una síntesis analítica y propositiva basada en los comentarios de los estudiantes "
-        "y, si se proporcionan, en los documentos guía adjuntos (formaciones EXA, protocolos, lineamientos). "
-        "El texto debe:\n"
-        "• Reconocer las fortalezas del docente mencionadas por los estudiantes.\n"
-        "• Identificar oportunidades de mejora de forma constructiva y respetuosa.\n"
-        "• Sugerir acciones concretas alineadas con los documentos guía cuando estén disponibles.\n"
-        "• Tener un tono institucional, profesional y empático.\n"
-        "• Estar redactado en español, en 2 a 4 párrafos fluidos, sin listas ni viñetas.\n"
-        "• NO incluir el título 'Consideraciones' (ya existe en el documento)."
+        f"{_saludo}, a continuación encontrarás la retroalimentación formativa de tu evaluación docente.\n\n"
+        "Actúa como un Diseñador Instruccional experto del Centro para la Excelencia en el Aprendizaje (EXA) "
+        "de la Universidad EAFIT. Tu objetivo es analizar los resultados de la evaluación docente de un curso "
+        "virtual o híbrido y generar una retroalimentación formativa, estratégica y empática, basada en el "
+        f"protocolo institucional, dirigiéndote en todo momento a {_el_la} docente de manera directa "
+        f"(usando el \"tú\" de forma cercana pero profesional), y llamándole por su primer nombre ({_pnombre if _nombre_docente_raw else 'primer nombre'}) "
+        "cuando sea natural hacerlo. "
+        "Al final, construirás una ruta de formación personalizada usando exclusivamente el catálogo de "
+        "Aprende+ que se detalla más adelante.\n\n"
+        "INSTRUCCIONES DE TAREA:\n"
+        "Analiza los datos anteriores bajo los principios de feedforward y evaluación integral. "
+        "Genera un informe formativo con las siguientes secciones:\n\n"
+        "1. PANORAMA GENERAL Y FORTALEZAS (máx. 300 palabras — un solo párrafo)\n"
+        "Redacta un único párrafo narrativo que cumpla las dos funciones a la vez: abre con un reconocimiento "
+        "cordial y concreto de sus principales fortalezas, basadas en los comentarios de los estudiantes y los "
+        "datos cuantitativos; luego, en continuidad fluida, ofrece una síntesis interpretativa del panorama "
+        "general del desempeño. Destaca 2 de sus fortalezas y anuncia con lenguaje constructivo las 2-3 áreas "
+        "que se abordarán a continuación. Usa un tono profesional, empático y de acompañamiento — nunca de "
+        "juicio. Evita viñetas; todo debe fluir como prosa.\n\n"
+        "2. CONSIDERACIONES Y ACCIONES DE MEJORA\n"
+        "Presenta entre 2 y 3 áreas de crecimiento. Para cada una, integra en un mismo bloque: la consideración "
+        "(redactada con verbos como Revisar, Ajustar, Fomentar, Fortalecer, Evaluar, Promover, Regular, "
+        "Realizar), la evidencia que la sustenta (comentario o puntaje específico) y la acción SMART sugerida "
+        "(específica, medible, alcanzable, relevante y temporal para la siguiente cohorte). Agrupa ideas "
+        "similares, evita repeticiones y mantén el lenguaje en clave de \"áreas de crecimiento\", no de "
+        "\"deficiencias\".\n\n"
+        "3. RUTA DE FORMACIÓN PERSONALIZADA\n"
+        "Con base en las áreas de crecimiento identificadas, diseña una ruta de formación de 2 a 3 pasos, "
+        "ordenados de mayor a menor prioridad. Para cada paso indica: el recurso de Aprende+ recomendado "
+        "(nombre exacto, enlace y una frase que explique por qué es relevante para este docente en particular), "
+        "y qué habilidad o resultado de aprendizaje específico del catálogo contribuye a resolver la necesidad "
+        "detectada.\n\n"
+        "Usa ÚNICAMENTE los recursos del siguiente catálogo institucional:\n\n"
+        "TRAYECTORIAS:\n"
+        "① Diseño de Experiencias de Aprendizaje\n"
+        "   → Competencia: diseñar y liderar secuencias didácticas con el Ciclo de Kolb.\n"
+        "   → Úsala cuando: el docente necesita estructurar mejor sus actividades, diversificar metodologías "
+        "o promover la participación y autonomía del estudiante.\n\n"
+        "② Trayectoria Innovación\n"
+        "   → Competencia: aplicar herramientas de innovación, creatividad y metodologías ágiles.\n"
+        "   → Úsala cuando: el docente busca renovar su práctica con enfoques más creativos o ágiles.\n\n"
+        "③ Trayectoria Inteligencia Artificial\n"
+        "   → Competencia: integrar IA para optimizar diseño de recursos, automatizar procesos y mejorar "
+        "eficiencia.\n"
+        "   → Úsala cuando: el docente necesita mejorar su gestión de recursos digitales o quiere innovar "
+        "con IA en el aula.\n\n"
+        "CURSOS INDIVIDUALES:\n"
+        "④ Diseño de Syllabus y Rúbricas para la Evaluación del Aprendizaje\n"
+        "   Enlace: https://interactivavirtual.eafit.edu.co/d2l/le/discovery/view/course/143311\n"
+        "   → Úsalo cuando: hay debilidad en claridad de criterios de evaluación o estructura del curso.\n\n"
+        "⑤ Metodología del Ciclo de Kolb\n"
+        "   Enlace: https://interactivavirtual.eafit.edu.co/d2l/le/discovery/view/course/130033\n"
+        "   → Úsalo cuando: el docente requiere una introducción al aprendizaje experiencial antes de "
+        "abordar la trayectoria completa.\n\n"
+        "⑥ Evaluación del Aprendizaje\n"
+        "   Enlace: https://interactivavirtual.eafit.edu.co/d2l/le/discovery/view/course/184752\n"
+        "   → Úsalo cuando: se detecta debilidad en estrategias de evaluación, retroalimentación o "
+        "seguimiento del aprendizaje.\n\n"
+        "⑦ Aprendizaje Basado en Retos (ABR)\n"
+        "   Enlace: https://interactivavirtual.eafit.edu.co/d2l/le/discovery/view/course/134289\n"
+        "   → Úsalo cuando: el docente quiere incorporar metodologías activas que promuevan pensamiento "
+        "crítico y colaboración.\n\n"
+        "⑧ Aprendizaje Basado en Proyectos (ABP)\n"
+        "   Enlace: https://interactivavirtual.eafit.edu.co/d2l/le/discovery/view/course/127810\n"
+        "   → Úsalo cuando: el docente quiere que los estudiantes aprendan resolviendo situaciones reales "
+        "mediante proyectos colaborativos.\n\n"
+        "⑨ El Pacto Pedagógico\n"
+        "   Enlace: https://interactivavirtual.eafit.edu.co/d2l/le/discovery/view/course/202260\n"
+        "   → Úsalo cuando: se detectan problemas de comunicación, acuerdos de convivencia o compromiso "
+        "entre docente y estudiantes.\n\n"
+        "No inventes recursos ni enlaces. Si ningún recurso del catálogo se ajusta a una necesidad detectada, "
+        "indícalo explícitamente.\n\n"
+        "PRINCIPIOS DE REDACCIÓN:\n"
+        "- Objetivo formativo: énfasis en \"áreas de crecimiento\", no en \"deficiencias\".\n"
+        "- Feedforward: orienta hacia acciones futuras, no hacia errores del pasado.\n"
+        "- Equilibrio: lo positivo siempre antes que las oportunidades de mejora.\n"
+        "- Tono profesional, respetuoso y de acompañamiento (nunca de juicio).\n"
+        "- Coherencia, buena gramática y puntuación en todo el texto.\n"
+        "- Sin redundancias ni extensiones innecesarias.\n"
+        f"- Dirígete siempre a {_el_la} docente como \"tú\" y usa su nombre ({_pnombre if _nombre_docente_raw else 'primer nombre'}) cuando sea natural.\n"
+        "- Usa SOLO los recursos del catálogo proporcionado; no inventes ni agregues otros."
     )
 
     instruccion_usuaria = st.text_area(
         "Instrucciones para la IA",
         value=PROMPT_BASE_USUARIO,
-        height=220,
+        height=380,
         help="Puedes modificar o agregar instrucciones. Este texto se envía directamente a la IA.",
     )
     st.markdown('</div>', unsafe_allow_html=True)
