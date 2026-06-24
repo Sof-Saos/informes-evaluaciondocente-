@@ -1496,13 +1496,13 @@ PAGINA = st.session_state.pagina_actual
 # ── Base de datos de evaluaciones (en disco, no se carga en RAM) ──
 _DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "evaluaciones.xlsx")
 
-if not os.path.isfile(_DB_PATH):
-    st.error("⚠️ No se encontró **evaluaciones.xlsx** en el repositorio. "
-             "Asegúrate de subirlo a GitHub junto con `app.py`.")
-    st.stop()
-
 # ── Entrada: Catálogo y Nº Clase ──
 if PAGINA == "generar":
+    if not os.path.isfile(_DB_PATH):
+        st.error("⚠️ No se encontró **evaluaciones.xlsx** en el repositorio. "
+                 "Asegúrate de subirlo a GitHub junto con `app.py`.")
+        st.stop()
+
     st.markdown('<div class="card"><div class="card-label">🔍 Buscar clase</div>', unsafe_allow_html=True)
 
     input_codigo = st.text_input(
@@ -2057,38 +2057,65 @@ if PAGINA == "consideraciones":
         docs_pendientes = st.session_state.get("_docs_pendientes", [])
 
         if docs_pendientes:
-            if st.button("💾 Guardar nuevos documentos en el repositorio",
-                         key="btn_guardar_docs"):
-                errores_subida = []
-                with st.spinner(f"Guardando {len(docs_pendientes)} documento(s)…"):
-                    for nombre_doc, bytes_doc in docs_pendientes:
-                        try:
-                            _gh_upload_doc_guia(_GH_TOKEN, nombre_doc, bytes_doc)
-                            docs_nuevos_bytes.append((nombre_doc, bytes_doc))
-                        except Exception as e:
-                            errores_subida.append(f"{nombre_doc}: {e}")
-                if errores_subida:
-                    for err in errores_subida:
-                        st.error(f"❌ {err}")
-                else:
-                    st.session_state.pop("_docs_pendientes", None)
-                    st.cache_data.clear()
-                    st.success(f"✅ {len(docs_pendientes)} documento(s) guardado(s) en el repositorio.")
-                    st.rerun()
-            else:
-                # No guardados aún, pero disponibles para usar en esta sesión
-                docs_nuevos_bytes = [(n, b) for n, b in docs_pendientes]
+            # Los docs pendientes SIEMPRE están disponibles para la IA en esta sesión,
+            # independientemente de si se guardan o no en GitHub.
+            docs_nuevos_bytes = [(n, b) for n, b in docs_pendientes]
+
+            col_save, col_info = st.columns([2, 3])
+            with col_save:
+                if st.button("💾 Guardar en el repositorio", key="btn_guardar_docs",
+                             help="Los guarda permanentemente para todas las sesiones futuras"):
+                    errores_subida = []
+                    with st.spinner(f"Guardando {len(docs_pendientes)} documento(s)…"):
+                        for nombre_doc, bytes_doc in docs_pendientes:
+                            try:
+                                _gh_upload_doc_guia(_GH_TOKEN, nombre_doc, bytes_doc)
+                            except Exception as e:
+                                errores_subida.append(f"{nombre_doc}: {e}")
+                    if errores_subida:
+                        for err in errores_subida:
+                            st.error(f"❌ {err}")
+                    else:
+                        st.session_state.pop("_docs_pendientes", None)
+                        st.cache_data.clear()
+                        st.success(f"✅ {len(docs_pendientes)} documento(s) guardado(s) en el repositorio.")
+                        st.rerun()
+            with col_info:
+                st.markdown(
+                    f"<small style='color:#A8ACBE;line-height:2.2'>"
+                    f"📂 {len(docs_pendientes)} doc(s) listos para usar en esta sesión. "
+                    f"Guárdalos para que estén disponibles siempre.</small>",
+                    unsafe_allow_html=True
+                )
 
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ── Paso 3: Indicación adicional (opcional) ──
-    st.markdown('<div class="card"><div class="card-label">3️⃣ Indicación adicional (opcional)</div>',
+    # ── Paso 3: Prompt editable ──
+    st.markdown('<div class="card"><div class="card-label">3️⃣ Prompt para la IA (editable)</div>',
                 unsafe_allow_html=True)
+    st.markdown(
+        '<small style="color:#A8ACBE">Este es el prompt base que se le envía a la IA. '        'Puedes modificarlo, añadir instrucciones específicas o cambiar el enfoque antes de generar.</small>',
+        unsafe_allow_html=True
+    )
+
+    PROMPT_BASE_USUARIO = (
+        "Redacta la sección 'Consideraciones' del informe de evaluación docente. "
+        "Debe ser una síntesis analítica y propositiva basada en los comentarios de los estudiantes "
+        "y, si se proporcionan, en los documentos guía adjuntos (formaciones EXA, protocolos, lineamientos). "
+        "El texto debe:\n"
+        "• Reconocer las fortalezas del docente mencionadas por los estudiantes.\n"
+        "• Identificar oportunidades de mejora de forma constructiva y respetuosa.\n"
+        "• Sugerir acciones concretas alineadas con los documentos guía cuando estén disponibles.\n"
+        "• Tener un tono institucional, profesional y empático.\n"
+        "• Estar redactado en español, en 2 a 4 párrafos fluidos, sin listas ni viñetas.\n"
+        "• NO incluir el título 'Consideraciones' (ya existe en el documento)."
+    )
+
     instruccion_usuaria = st.text_area(
-        "¿Qué quieres rescatar de los documentos guía, qué enfoque esperas o qué "
-        "resultado buscas en la versión final?",
-        placeholder="Ej: Enfatiza el acompañamiento pedagógico y sugiere una formación EXA concreta…",
-        height=100,
+        "Instrucciones para la IA",
+        value=PROMPT_BASE_USUARIO,
+        height=220,
+        help="Puedes modificar o agregar instrucciones. Este texto se envía directamente a la IA.",
     )
     st.markdown('</div>', unsafe_allow_html=True)
 
