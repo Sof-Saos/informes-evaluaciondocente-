@@ -931,18 +931,21 @@ def extraer_texto_informe_actual(docx_bytes: bytes) -> dict:
 
 
 def _primer_nombre(nombre_completo: str) -> str:
-    """Extrae el primer nombre del docente (los apellidos suelen ir primero en EAFIT)."""
+    """
+    Extrae el primer nombre del docente.
+    En EAFIT el formato es: APELLIDO1 APELLIDO2 NOMBRE1 NOMBRE2
+    Con 4+ palabras → la tercera es el primer nombre.
+    Con 3 palabras  → la segunda es el primer nombre.
+    Con 2 palabras  → la segunda es el primer nombre.
+    Con 1 palabra   → se usa tal cual (puede ser nombre o apellido, no hay forma de saber).
+    """
     partes = nombre_completo.strip().split()
-    # Heurística: si hay 4+ palabras, los dos primeros son apellidos → tercer es nombre
-    # Si hay 3, el primero es apellido → segundo es nombre
-    # Si hay 2, el primero es apellido → segundo es nombre
-    # Si hay 1, usar tal cual
     if len(partes) >= 4:
         return partes[2].capitalize()
     elif len(partes) == 3:
-        return partes[1].capitalize()
+        return partes[2].capitalize()   # con 3 partes: apellido1 apellido2 nombre → la última
     elif len(partes) == 2:
-        return partes[1].capitalize()
+        return partes[1].capitalize()   # apellido nombre → la segunda
     return partes[0].capitalize() if partes else "Docente"
 
 
@@ -2140,17 +2143,32 @@ if PAGINA == "consideraciones":
         try:
             _info_tmp = extraer_texto_informe_actual(informe_bytes_base)
             for linea in _info_tmp.get("portada", "").splitlines():
-                if "Nombre profesor" in linea or "profesor" in linea.lower():
-                    partes_linea = linea.split(":", 1)
-                    if len(partes_linea) == 2:
-                        _nombre_docente_raw = partes_linea[1].strip()
+                linea_strip = linea.strip()
+                # Intentar con separador ":"
+                if re.search(r"[Nn]ombre\s+profe", linea_strip):
+                    # Con dos puntos: "Nombre profesor: Muñoz Juan"
+                    m = re.search(r"[Nn]ombre\s+profe[^:]*:\s*(.+)", linea_strip)
+                    if m:
+                        _nombre_docente_raw = m.group(1).strip()
                         break
+                    # Sin dos puntos: "Nombre profesorMuñoz Juan" o "Nombre profesor Muñoz Juan"
+                    m2 = re.search(r"[Nn]ombre\s+[Pp]rofesor[a]?\s+(.+)", linea_strip)
+                    if m2:
+                        _nombre_docente_raw = m2.group(1).strip()
+                        break
+            # Fallback: tomar del nombre del archivo si está disponible
+            if not _nombre_docente_raw and ultimo_informe:
+                nombre_arch = ultimo_informe.get("nombre", "")
+                # Formato: CICLO_ESCUELA_CURSO_PrimerNombrePrimerApellido.docx
+                partes_arch = nombre_arch.replace(".docx", "").split("_")
+                if len(partes_arch) >= 4:
+                    _nombre_docente_raw = partes_arch[-1]  # ej: "JuanMuñoz" → tratar como 1 palabra
         except Exception:
             pass
 
     if _nombre_docente_raw:
         _trat, _pnombre, _genero = _tratamiento(_nombre_docente_raw)
-        st.info(f"👤 Docente detectado/a: **{_trat} {_pnombre}** — la IA se dirigirá a {('ella' if _genero == 'F' else 'él')} por este nombre.")
+        st.info(f"👤 Docente detectado/a: **{_trat} {_pnombre}** — la IA se dirigirá a {('ella' if _genero == 'F' else 'él')} por este nombre. *(nombre completo leído: {_nombre_docente_raw})*")
 
     # Prompt editable: solo las instrucciones institucionales (el saludo lo inserta la IA automáticamente)
     PROMPT_BASE_USUARIO = (
