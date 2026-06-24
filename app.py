@@ -380,7 +380,6 @@ def generar_informe_bytes(nombre: str, datos: dict,
     reemplazar(body, '{Nombre_programa}',  info.get('escuela', ''))
     reemplazar(body, '{Numero_codigo}',    info.get('catalogo_clase', ''))
     reemplazar(body, '{Numero_semestre}',  info.get('ciclo', ''))
-    reemplazar(body, '{Modalidad}',        info.get('modalidad', ''))
     reemplazar(body, '{Nombre_profesor}',  nombre.title())
 
     # ── Tasa de respuesta: párrafo "Tasa de respuesta: %" → "Tasa de respuesta: 47%" ──
@@ -617,19 +616,11 @@ def generar_informe_bytes(nombre: str, datos: dict,
                 if rPr.find(W+'b') is None:
                     etree.SubElement(rPr, W+'b')
 
-    # Cambio 6: Quitar bullet point (numPr) de Modalidad, manteniendo estilo visual idéntico
-    # a los otros ítems de la lista (indentación de ListParagraph pero sin bullet)
-    modalidad_idx = next((i for i, c in enumerate(list(body))
-                          if 'Modalidad:' in texto_de(c)), None)
-    if modalidad_idx is not None:
-        child = list(body)[modalidad_idx]
-        pPr = child.find(W+'pPr')
-        if pPr is not None:
-            # Solo quitar numPr — mantener estilo ListParagraph e indentación
-            # para que quede visualmente igual pero sin el bullet
-            numPr = pPr.find(W+'numPr')
-            if numPr is not None:
-                pPr.remove(numPr)
+    # Cambio 6: Eliminar completamente el párrafo de Modalidad
+    for child in list(body):
+        if 'Modalidad:' in texto_de(child):
+            body.remove(child)
+            break
 
     # ── Empaquetar ──
 
