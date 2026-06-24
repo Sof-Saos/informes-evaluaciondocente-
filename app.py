@@ -933,19 +933,10 @@ def extraer_texto_informe_actual(docx_bytes: bytes) -> dict:
 def _primer_nombre(nombre_completo: str) -> str:
     """
     Extrae el primer nombre del docente.
-    En EAFIT el formato es: APELLIDO1 APELLIDO2 NOMBRE1 NOMBRE2
-    Con 4+ palabras → la tercera es el primer nombre.
-    Con 3 palabras  → la segunda es el primer nombre.
-    Con 2 palabras  → la segunda es el primer nombre.
-    Con 1 palabra   → se usa tal cual (puede ser nombre o apellido, no hay forma de saber).
+    En el informe Word el nombre viene como: NOMBRE1 NOMBRE2 APELLIDO1 APELLIDO2
+    (ej: "Juan Carlos Muñoz Mora") → el primer nombre es siempre partes[0].
     """
     partes = nombre_completo.strip().split()
-    if len(partes) >= 4:
-        return partes[2].capitalize()
-    elif len(partes) == 3:
-        return partes[2].capitalize()   # con 3 partes: apellido1 apellido2 nombre → la última
-    elif len(partes) == 2:
-        return partes[1].capitalize()   # apellido nombre → la segunda
     return partes[0].capitalize() if partes else "Docente"
 
 
