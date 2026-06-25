@@ -499,12 +499,8 @@ def generar_informe_bytes(nombre: str, datos: dict,
                     t.text = ''
             body.insert(insert_pos + j, new_p)
 
-    # ── Consideraciones: limpiar el placeholder { Comentario: Profesor …. } ──
-    # La nueva plantilla usa este texto como placeholder en la sección Consideraciones
-    for child in list(body):
-        t = texto_de(child)
-        if '{ Comentario' in t and 'Profesor' in t:
-            body.remove(child)
+    # ── Consideraciones: limpiar el placeholder {Comentario parrafo} ──
+    reemplazar(body, '{Comentario parrafo}', '')
 
     # ── POST-PROCESO: ajustes de estilo ──────────────────────────────────────
 
@@ -911,7 +907,7 @@ def extraer_texto_informe_actual(docx_bytes: bytes) -> dict:
 
     # Comentarios
     idx_consideraciones = next((i for i, t in enumerate(textos)
-                                if t.strip().rstrip("\xa0 :") == "Consideraciones"), None)
+                                if t.strip().rstrip("\xa0 ") == "Consideraciones"), None)
     comentarios_texto = []
     capturando = False
     for t in textos:
@@ -919,7 +915,7 @@ def extraer_texto_informe_actual(docx_bytes: bytes) -> dict:
             capturando = True
             comentarios_texto.append(f"\n— {t} —")
             continue
-        if t.strip().rstrip("\xa0 :") == "Consideraciones":
+        if t.strip().rstrip("\xa0 ") == "Consideraciones":
             break
         if capturando and t:
             comentarios_texto.append(t)
@@ -1020,29 +1016,41 @@ def generar_consideraciones_ia(token: str, info_informe: dict, contexto_docs: st
         _trat, _pnombre, _el_la = "Profesor/a", "docente", "el/la"
 
     prompt_sistema = (
-        "Eres un Diseñador Instruccional del Centro para la Excelencia en el Aprendizaje (EXA) "
-        "de la Universidad EAFIT. Recibes los resultados de la evaluación docente de un curso "
-        "y redactas la sección de Consideraciones del informe.\n\n"
-        f"Dirígete al docente directamente usando su nombre '{_pnombre}' y tuteándolo. "
-        f"Empieza el texto con '{_pnombre},' (solo el nombre, sin saludo ni protocolo). "
-        "El tono debe ser profesional y cercano — como el de un colega que acompaña, no el de "
-        "un evaluador que juzga. Nada de frases de cortesía como 'es un gusto compartir' o "
-        "'esperamos que esta retroalimentación sea de utilidad'. Ve directo al análisis.\n\n"
-        "Estructura el texto en exactamente tres bloques separados por párrafo vacío:\n\n"
-        "1. PANORAMA GENERAL Y FORTALEZAS (un solo párrafo, máx. 250 palabras)\n"
-        "Abre directamente con las fortalezas concretas del docente según los comentarios y "
-        "puntajes. Nombra 2 fortalezas específicas con evidencia. Cierra el párrafo anunciando "
-        "brevemente las áreas de crecimiento que se desarrollarán a continuación. "
-        "Todo en prosa fluida, sin viñetas ni subtítulos.\n\n"
-        "2. CONSIDERACIONES Y ACCIONES DE MEJORA (2 a 3 párrafos, uno por área de crecimiento)\n"
-        "Cada párrafo aborda una sola área. Empieza con un verbo de acción (Revisar, Ajustar, "
-        "Fomentar, Fortalecer, Evaluar, Promover, Regular, Realizar), luego la evidencia que lo "
-        "sustenta (comentario concreto o puntaje), y cierra con una acción SMART para la "
-        "siguiente cohorte. Sin viñetas. Sin subtítulos. Todo en prosa.\n\n"
-        "3. RUTA DE FORMACIÓN PERSONALIZADA (un párrafo introductorio + lista de 2 a 3 recursos)\n"
-        "Un párrafo breve que conecte las áreas de mejora con la ruta propuesta, seguido de "
-        "los recursos recomendados con nombre exacto, enlace y razón específica para este docente. "
-        "Usa ÚNICAMENTE los recursos del catálogo proporcionado. No inventes recursos ni enlaces.\n\n"
+        "Actúa como un Diseñador Instruccional experto del Centro para la Excelencia en el "
+        "Aprendizaje (EXA) de la Universidad EAFIT. Tu objetivo es analizar los resultados de "
+        "la evaluación docente de un curso virtual o híbrido y generar una retroalimentación "
+        "formativa, estratégica y empática, basada en el protocolo institucional, dirigiéndote "
+        "en todo momento al docente de manera directa (usando el \"tú\" de forma cercana pero "
+        "profesional). Al final, construirás una ruta de formación personalizada usando "
+        "exclusivamente el catálogo de Aprende+ que se detalla más adelante.\n\n"
+
+        "INSTRUCCIONES DE TAREA:\n"
+        "Analiza los datos bajo los principios de feedforward y evaluación integral. "
+        "Genera un informe formativo con las siguientes secciones:\n\n"
+
+        "1. Panorama general y fortalezas (máx. 60 palabras — un solo párrafo)\n"
+        "Redacta un único párrafo narrativo que abra con un reconocimiento cordial y concreto "
+        "de las principales fortalezas, basadas exclusivamente en los comentarios cualitativos "
+        "de los estudiantes — no menciones la tasa de respuesta ni datos cuantitativos. Luego, "
+        "en continuidad fluida, ofrece una síntesis interpretativa del panorama general del "
+        "desempeño. Usa un tono profesional, empático y de acompañamiento — nunca de juicio. "
+        "Evita viñetas; todo debe fluir como prosa.\n\n"
+
+        "2. Consideraciones y acciones de mejora\n"
+        "Presenta entre 2 y 3 áreas de crecimiento. Para cada una, integra en un mismo bloque: "
+        "la consideración (redactada con verbos como Revisar, Ajustar, Fomentar, Fortalecer, "
+        "Evaluar, Promover, Regular, Realizar), la evidencia que la sustenta (comentario "
+        "específico de los estudiantes) y la acción SMART sugerida (específica, medible, "
+        "alcanzable, relevante y temporal para la siguiente cohorte). Agrupa ideas similares, "
+        "evita repeticiones y mantén el lenguaje en clave de \"áreas de crecimiento\", no de "
+        "\"deficiencias\".\n\n"
+
+        "3. Ruta de formación personalizada\n"
+        "Con base en las áreas de crecimiento identificadas, diseña una ruta de formación de "
+        "1 a 2 pasos, ordenados de mayor a menor prioridad. Para cada paso indica: el recurso "
+        "de Aprende+ recomendado (nombre exacto, enlace y una frase que explique por qué es "
+        "relevante para este docente en particular).\n\n"
+
         "Usa ÚNICAMENTE los recursos del siguiente catálogo institucional:\n\n"
         "TRAYECTORIAS:\n"
         "① Diseño de Experiencias de Aprendizaje\n"
@@ -1083,21 +1091,84 @@ def generar_consideraciones_ia(token: str, info_informe: dict, contexto_docs: st
         "compromiso entre docente y estudiantes.\n\n"
         "No inventes recursos ni enlaces. Si ningún recurso del catálogo se ajusta a una necesidad "
         "detectada, indícalo explícitamente.\n\n"
+
         "PRINCIPIOS DE REDACCIÓN:\n"
-        "- Objetivo formativo: énfasis en 'áreas de crecimiento', no en 'deficiencias'.\n"
+        "- Énfasis en \"áreas de crecimiento\", no en \"deficiencias\".\n"
         "- Feedforward: orienta hacia acciones futuras, no hacia errores del pasado.\n"
-        "- Equilibrio: lo positivo siempre antes que las oportunidades de mejora.\n"
+        "- Lo positivo siempre antes que las oportunidades de mejora.\n"
         "- Tono profesional, respetuoso y de acompañamiento (nunca de juicio).\n"
         "- Coherencia, buena gramática y puntuación en todo el texto.\n"
         "- Sin redundancias ni extensiones innecesarias.\n"
-        "- Usa SOLO los recursos del catálogo proporcionado; no inventes ni agregues otros."
+        "- Usa SOLO los recursos del catálogo proporcionado; no inventes ni agregues otros.\n"
+        f"- Dirígete al docente usando su nombre en todas las menciones, con el formato "
+        f"\"profesor/a + nombre propio\" (ejemplo: profesor {_pnombre} o profesora {_pnombre} "
+        f"según corresponda). Su nombre es {_pnombre} y el tratamiento es {_trat}.\n"
+        "- Los títulos de cada sección van en minúscula (salvo la primera letra) y en negrita.\n"
+        "- No menciones la tasa de respuesta ni datos cuantitativos; basa el análisis "
+        "exclusivamente en los comentarios cualitativos de los estudiantes.\n\n"
+
+        "=== EJEMPLO DE SALIDA ESPERADA ===\n"
+        "A continuación un ejemplo real de cómo debe verse el resultado. Imita este tono, "
+        "estructura, nivel de detalle y formato exactamente:\n\n"
+
+        "--- INICIO DEL EJEMPLO ---\n"
+        "**Panorama general y fortalezas**\n"
+        "Profesora María Adelaida, algunos estudiantes reconocen que el curso está bien "
+        "organizado, que las instrucciones de las actividades suelen ser claras, que cumples "
+        "con los pactos pedagógicos y que eres responsable en la entrega de calificaciones. "
+        "Esos elementos de orden y estructura son una base sobre la cual trabajar, y las "
+        "oportunidades de crecimiento que se identifican a continuación —que en este grupo se "
+        "expresan con mayor intensidad que en otros— apuntan hacia la comunicación, la equidad "
+        "evaluativa y el acompañamiento al estudiante en el entorno virtual.\n\n"
+
+        "**Consideraciones y acciones de mejora**\n"
+        "Área 1: Fortalecer la comunicación, la escucha activa y la disponibilidad ante "
+        "inquietudes evaluativas\n"
+        "Revisar la forma en que se gestionan las solicitudes de retroalimentación y revisión "
+        "de notas, asegurando que todos los estudiantes reciban respuesta oportuna y respetuosa, "
+        "especialmente en un formato virtual donde ese canal es el único punto de contacto. "
+        "Múltiples estudiantes describieron intentos reiterados de comunicación por correo y "
+        "Teams sin obtener respuesta, y en algunos casos recibieron respuestas que percibieron "
+        "como poco empáticas. Como acción SMART: establece desde la primera semana un protocolo "
+        "de comunicación con canales definidos, tiempos máximos de respuesta de 48 horas "
+        "hábiles, y un procedimiento claro para la revisión de calificaciones, publicado en la "
+        "plataforma y parte del pacto pedagógico inicial.\n\n"
+        "Área 2: Revisar la coherencia y transparencia de los criterios de evaluación, "
+        "especialmente en el proyecto final\n"
+        "Ajustar las rúbricas y las instrucciones de las actividades evaluativas para que los "
+        "criterios sean claros, aplicados de manera consistente y comunicados con el mismo nivel "
+        "de detalle a todos los grupos. Varios estudiantes señalaron que la retroalimentación "
+        "del proyecto final fue desigual entre grupos, que algunas instrucciones resultaron "
+        "confusas —particularmente en relación con el uso de IA y Turnitin— y que las "
+        "calificaciones no siempre correspondían con los criterios establecidos. Como acción "
+        "SMART: antes de la próxima cohorte, revisa la rúbrica del proyecto final para que cada "
+        "criterio tenga indicadores observables y verificables, define por escrito las condiciones "
+        "de uso de herramientas de IA, y establece un protocolo uniforme de retroalimentación "
+        "para todos los grupos.\n\n"
+
+        "**Ruta de formación personalizada**\n"
+        "El Pacto Pedagógico\n"
+        "https://interactivavirtual.eafit.edu.co/d2l/le/discovery/view/course/202260\n"
+        "Para ti, profesora María Adelaida, este recurso es especialmente urgente en este grupo, "
+        "donde la desconexión comunicativa y la falta de acuerdos explícitos generaron "
+        "situaciones de alta tensión entre docente y estudiantes. Construir ese pacto desde el "
+        "primer día —con canales, tiempos, procedimientos y compromisos mutuos— puede prevenir "
+        "gran parte de las fricciones identificadas y restablecer la confianza en el proceso "
+        "formativo.\n\n"
+        "Diseño de Syllabus y Rúbricas para la Evaluación del Aprendizaje\n"
+        "https://interactivavirtual.eafit.edu.co/d2l/le/discovery/view/course/143311\n"
+        "Este recurso te dará herramientas concretas para diseñar instrumentos evaluativos más "
+        "transparentes, coherentes y aplicados de forma uniforme. Dado que en este grupo las "
+        "inconformidades con la evaluación del proyecto final fueron el detonante principal de "
+        "conflictos, contar con rúbricas bien construidas y criterios comunicados desde el inicio "
+        "será clave para fortalecer la percepción de justicia y claridad en el curso.\n"
+        "--- FIN DEL EJEMPLO ---"
     )
 
 
     partes_usuario = [
         f"INFORMACIÓN DEL CURSO Y PROFESOR:\n{info_informe['portada']}\n",
-        f"COMENTARIOS DE ESTUDIANTES:\n{info_informe['comentarios'] or '(sin comentarios registrados)'}\n",
-        f"PUNTAJES POR COMPETENCIA:\n{info_informe.get('competencias', '(no disponibles)')}\n",
+        f"COMENTARIOS CUALITATIVOS DE ESTUDIANTES:\n{info_informe['comentarios'] or '(sin comentarios registrados)'}\n",
     ]
     if contexto_docs:
         partes_usuario.append(f"DOCUMENTOS DE REFERENCIA INSTITUCIONALES:\n{contexto_docs}\n")
@@ -1105,9 +1176,10 @@ def generar_consideraciones_ia(token: str, info_informe: dict, contexto_docs: st
         partes_usuario.append(f"INSTRUCCIONES ADICIONALES DEL EQUIPO EXA:\n{instruccion_usuaria.strip()}\n")
 
     partes_usuario.append(
-        f"Con base en todo lo anterior, genera el informe formativo completo. "
-        f"Recuerda: el texto debe comenzar con '{_trat} {_pnombre},' y dirigirte a {_el_la} "
-        f"docente por su nombre a lo largo de toda la retroalimentación."
+        f"Con base en los comentarios cualitativos anteriores, genera el informe formativo completo "
+        f"siguiendo exactamente el formato del ejemplo. "
+        f"Recuerda: usa siempre \"{_trat} {_pnombre}\" para referirte al docente, "
+        f"los títulos de sección en minúscula y negrita, y NO menciones datos cuantitativos."
     )
 
     prompt_usuario = "\n".join(partes_usuario)
@@ -1185,17 +1257,15 @@ def insertar_consideraciones_en_docx(docx_bytes: bytes, texto_consideraciones: s
     def texto_de(elem):
         return "".join(t.text or "" for t in elem.iter(W + 't')).strip().rstrip("\xa0 ")
 
-    idx_titulo = next((i for i, c in enumerate(children)
-                       if texto_de(c).strip().rstrip(": ") == "Consideraciones"), None)
+    idx_titulo = next((i for i, c in enumerate(children) if texto_de(c) == "Consideraciones"), None)
     if idx_titulo is None:
         raise RuntimeError("No se encontró la sección 'Consideraciones' en este informe. "
                            "Verifica que el archivo subido sea un informe generado por esta app.")
 
-    # Buscar hasta dónde van los huecos (vacíos O placeholders) después del título
+    # Buscar hasta dónde van los huecos vacíos después del título
     idx_siguiente_con_texto = None
     for j in range(idx_titulo + 1, len(children)):
-        t = texto_de(children[j])
-        if t and '{ Comentario' not in t:
+        if texto_de(children[j]):
             idx_siguiente_con_texto = j
             break
     if idx_siguiente_con_texto is None:
