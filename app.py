@@ -499,8 +499,12 @@ def generar_informe_bytes(nombre: str, datos: dict,
                     t.text = ''
             body.insert(insert_pos + j, new_p)
 
-    # ── Consideraciones: limpiar el placeholder {Comentario parrafo} ──
-    reemplazar(body, '{Comentario parrafo}', '')
+    # ── Consideraciones: limpiar placeholders de ambas versiones de plantilla ──
+    reemplazar(body, '{Comentario parrafo}', '')   # plantilla vieja
+    for child in list(body):
+        t = texto_de(child)
+        if '{ Comentario' in t and 'Profesor' in t:
+            body.remove(child)                      # plantilla nueva
 
     # ── POST-PROCESO: ajustes de estilo ──────────────────────────────────────
 
@@ -907,7 +911,7 @@ def extraer_texto_informe_actual(docx_bytes: bytes) -> dict:
 
     # Comentarios
     idx_consideraciones = next((i for i, t in enumerate(textos)
-                                if t.strip().rstrip("\xa0 ") == "Consideraciones"), None)
+                                if t.strip().rstrip("\xa0 :") == "Consideraciones"), None)
     comentarios_texto = []
     capturando = False
     for t in textos:
@@ -915,7 +919,7 @@ def extraer_texto_informe_actual(docx_bytes: bytes) -> dict:
             capturando = True
             comentarios_texto.append(f"\n— {t} —")
             continue
-        if t.strip().rstrip("\xa0 ") == "Consideraciones":
+        if t.strip().rstrip("\xa0 :") == "Consideraciones":
             break
         if capturando and t:
             comentarios_texto.append(t)
@@ -1257,15 +1261,17 @@ def insertar_consideraciones_en_docx(docx_bytes: bytes, texto_consideraciones: s
     def texto_de(elem):
         return "".join(t.text or "" for t in elem.iter(W + 't')).strip().rstrip("\xa0 ")
 
-    idx_titulo = next((i for i, c in enumerate(children) if texto_de(c) == "Consideraciones"), None)
+    idx_titulo = next((i for i, c in enumerate(children)
+                       if texto_de(c).strip().rstrip(": ") == "Consideraciones"), None)
     if idx_titulo is None:
         raise RuntimeError("No se encontró la sección 'Consideraciones' en este informe. "
                            "Verifica que el archivo subido sea un informe generado por esta app.")
 
-    # Buscar hasta dónde van los huecos vacíos después del título
+    # Buscar hasta dónde van los huecos (vacíos O placeholders) después del título
     idx_siguiente_con_texto = None
     for j in range(idx_titulo + 1, len(children)):
-        if texto_de(children[j]):
+        t = texto_de(children[j])
+        if t and '{ Comentario' not in t and '{Comentario' not in t:
             idx_siguiente_con_texto = j
             break
     if idx_siguiente_con_texto is None:
