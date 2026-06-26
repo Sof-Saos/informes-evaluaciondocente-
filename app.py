@@ -832,7 +832,7 @@ def _spider_chart_png(notas: dict) -> bytes:
 
 GITHUB_MODELS_URL   = "https://models.github.ai/inference/chat/completions"
 GITHUB_MODELS_MODEL = "openai/gpt-4o"
-MAX_CHARS_CONTEXTO  = 24000   # ~6000-8000 tokens aprox.
+MAX_CHARS_CONTEXTO  = 16000   # ~4000 tokens — margen seguro para gpt-4o (límite: 8000 tokens)
 
 def extraer_texto_referencia(nombre_archivo: str, contenido: bytes) -> str:
     """Extrae texto plano de un archivo de referencia (.pdf, .docx, .txt)."""
@@ -2388,6 +2388,7 @@ if PAGINA == "consideraciones":
                 info_informe  = extraer_texto_informe_actual(informe_bytes)
 
                 contexto_partes = []
+                MAX_CHARS_POR_DOC = 4000   # ~1000 tokens por doc — gpt-4o tiene límite de 8k total
 
                 # Documentos persistentes seleccionados (se descargan desde GitHub)
                 for doc in docs_seleccionados_nombres:
@@ -2395,7 +2396,8 @@ if PAGINA == "consideraciones":
                         contenido = _gh_descargar_doc(doc["url"], _GH_TOKEN)
                         texto_doc = extraer_texto_referencia(doc["nombre"], contenido)
                         if texto_doc.strip():
-                            contexto_partes.append(f"--- {doc['nombre']} ---\n{texto_doc.strip()}")
+                            texto_doc = texto_doc.strip()[:MAX_CHARS_POR_DOC]
+                            contexto_partes.append(f"--- {doc['nombre']} ---\n{texto_doc}")
                     except Exception:
                         pass   # Si un doc no se puede descargar, se omite silenciosamente
 
@@ -2403,7 +2405,8 @@ if PAGINA == "consideraciones":
                 for nombre_doc, bytes_doc in docs_nuevos_bytes:
                     texto_doc = extraer_texto_referencia(nombre_doc, bytes_doc)
                     if texto_doc.strip():
-                        contexto_partes.append(f"--- {nombre_doc} ---\n{texto_doc.strip()}")
+                        texto_doc = texto_doc.strip()[:MAX_CHARS_POR_DOC]
+                        contexto_partes.append(f"--- {nombre_doc} ---\n{texto_doc}")
 
                 contexto_docs = "\n\n".join(contexto_partes)
 
