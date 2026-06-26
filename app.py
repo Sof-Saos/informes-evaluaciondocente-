@@ -1839,7 +1839,9 @@ def _gh_get_file_sha(token: str, path: str) -> str | None:
 def _gh_upload_doc_guia(token: str, nombre: str, contenido: bytes) -> bool:
     """Sube un documento guía a docs_guia/ en el repo. Si ya existe, lo actualiza."""
     import base64
-    path = f"{_GH_DOCS_FOLDER}/{nombre}"
+    # Sanitizar: reemplazar espacios y caracteres problemáticos en la URL
+    nombre_safe = re.sub(r'[^A-Za-z0-9._\-]', '_', nombre)
+    path = f"{_GH_DOCS_FOLDER}/{nombre_safe}"
     url  = f"https://api.github.com/repos/{_GH_REPO}/contents/{path}"
     sha  = _gh_get_file_sha(token, path)   # None si no existe aún
     payload = {
