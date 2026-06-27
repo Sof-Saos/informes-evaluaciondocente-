@@ -1177,21 +1177,20 @@ def generar_consideraciones_ia(token: str, info_informe: dict, contexto_docs: st
     ]
     if contexto_docs:
         partes_usuario.append(f"DOCUMENTOS DE REFERENCIA INSTITUCIONALES:\n{contexto_docs}\n")
-    if instruccion_usuaria.strip():
-        partes_usuario.append(f"INSTRUCCIONES ADICIONALES DEL EQUIPO EXA:\n{instruccion_usuaria.strip()}\n")
 
     partes_usuario.append(
-        f"Con base en los comentarios cualitativos anteriores, genera el informe formativo completo "
-        f"siguiendo exactamente el formato del ejemplo. "
-        f"Recuerda: usa siempre \"{_trat} {_pnombre}\" para referirte al docente, "
-        f"los títulos de sección en minúscula y negrita, y NO menciones datos cuantitativos."
+        f"Con base en los comentarios cualitativos anteriores, genera el informe formativo. "
+        f"Dirígete al docente como \"{_trat} {_pnombre}\". No menciones datos cuantitativos."
     )
+
+    # El prompt editable del usuario ES el system prompt — manda sobre todo lo demás
+    system = instruccion_usuaria.strip() if instruccion_usuaria.strip() else prompt_sistema
 
     prompt_usuario = "\n".join(partes_usuario)
     if len(prompt_usuario) > MAX_CHARS_CONTEXTO:
         prompt_usuario = prompt_usuario[:MAX_CHARS_CONTEXTO] + "\n[...contexto recortado por límite de tokens...]"
 
-    return llamar_github_models(token, prompt_sistema, prompt_usuario, max_tokens=1500)
+    return llamar_github_models(token, system, prompt_usuario, max_tokens=1500)
 
 
 def _crear_parrafo_consideracion(texto: str, fuente: str = "Calibri",
