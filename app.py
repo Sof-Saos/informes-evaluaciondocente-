@@ -1937,6 +1937,32 @@ def _gh_cargar_prompt_cached(token: str) -> str | None:
     """Versión cacheada (5 min) de _gh_cargar_prompt para no hammear la API."""
     return _gh_cargar_prompt(token)
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _gh_listar_docs_guia(token: str) -> list[dict]:
+    """
+    Lista los documentos guardados en docs_guia/ del repo.
+    Devuelve lista de dicts: [{nombre, download_url, sha, size}].
+    Cacheado 60s para no hammear la API en cada rerun de Streamlit.
+    """
+    url = f"https://api.github.com/repos/{_GH_REPO}/contents/{_GH_DOCS_FOLDER}"
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            items = _json.loads(r.read())
+            return [
+                {"nombre": i["name"], "url": i["download_url"],
+                 "sha": i["sha"], "size": i.get("size", 0)}
+                for i in items if i["type"] == "file"
+            ]
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return []   # carpeta no existe aún
+        raise
+
 
     """
     Lista los documentos guardados en docs_guia/ del repo.
