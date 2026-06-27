@@ -62,6 +62,6 @@ PRINCIPIOS DE REDACCIÓN:
 - Coherencia, buena gramática y puntuación en todo el texto.
 - Sin redundancias ni extensiones innecesarias.
 - Usa SOLO los recursos del catálogo proporcionado; no inventes ni agregues otros.
-- NO PONGAS TITULOS NI PONGAS DOBLE ** EN TITULOS NI NADA. SIGUE LAS INDICACIONES DE ESTE PROMPT AL PIE DE LA LETRA.
+- NO PONGAS TITULOS NI PONGAS DOBLE ** EN TITULOS NI NADA. SIGUE LAS INDICACIONES DE ESTE PROMPT AL PIE DE LA LETRA. NOTHING LIKE **consideraciones y acciones de mejora**  OR **ruta de formación personalizada** .  DONT DO THAT!!!!!!
 
 IMPORTANT! DO NOT USE TITLES OR ANYTHING THAT IS NOT MENTIONED IN THIS PROMPT.
