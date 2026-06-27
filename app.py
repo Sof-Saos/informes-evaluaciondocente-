@@ -1768,6 +1768,11 @@ if PAGINA == "generar":
                         "nombre": nombre_arch,
                         "bytes": docx_bytes,
                     }
+                    # Limpiar cache de consideraciones para que se refresque con el nuevo informe
+                    for _k in ["_nombre_docente_cache_key", "_nombre_docente_cache",
+                               "_consideraciones_informe_key", "consideraciones_texto",
+                               "consideraciones_docx_bytes", "consideraciones_nombre_archivo"]:
+                        st.session_state.pop(_k, None)
                     st.success(f"✅ Informe generado: **{nombre_arch}**")
                     st.download_button(
                         label="⬇️  Descargar informe",
@@ -1884,8 +1889,55 @@ def _gh_delete_doc_guia(token: str, nombre: str) -> bool:
     with urllib.request.urlopen(req, timeout=30) as r:
         return r.status in (200, 201)
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def _gh_listar_docs_guia(token: str) -> list[dict]:
+_GH_PROMPT_FILE = "prompt_consideraciones.txt"   # archivo donde se guarda el prompt
+
+def _gh_cargar_prompt(token: str) -> str | None:
+    """Carga el prompt guardado desde GitHub. Devuelve None si no existe aún."""
+    import base64
+    url = f"https://api.github.com/repos/{_GH_REPO}/contents/{_GH_PROMPT_FILE}"
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = _json.loads(r.read())
+            return base64.b64decode(data["content"]).decode("utf-8")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise
+
+def _gh_guardar_prompt(token: str, prompt_texto: str) -> bool:
+    """Guarda el prompt en GitHub (crea o actualiza prompt_consideraciones.txt)."""
+    import base64
+    path = _GH_PROMPT_FILE
+    sha  = _gh_get_file_sha(token, path)
+    payload = {
+        "message": "Actualizar prompt de consideraciones",
+        "content": base64.b64encode(prompt_texto.encode("utf-8")).decode(),
+        "branch":  "main",
+    }
+    if sha:
+        payload["sha"] = sha
+    url  = f"https://api.github.com/repos/{_GH_REPO}/contents/{path}"
+    data = _json.dumps(payload).encode()
+    req  = urllib.request.Request(url, data=data, method="PUT", headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    })
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.status in (200, 201)
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _gh_cargar_prompt_cached(token: str) -> str | None:
+    """Versión cacheada (5 min) de _gh_cargar_prompt para no hammear la API."""
+    return _gh_cargar_prompt(token)
+
+
     """
     Lista los documentos guardados en docs_guia/ del repo.
     Devuelve lista de dicts: [{nombre, download_url, sha, size}].
@@ -2245,33 +2297,35 @@ if PAGINA == "consideraciones":
     )
 
     # ── Detectar nombre y género del docente desde el informe subido ──
-    _nombre_docente_raw = ""
-    if informe_bytes_base is not None:
-        try:
-            _info_tmp = extraer_texto_informe_actual(informe_bytes_base)
-            for linea in _info_tmp.get("portada", "").splitlines():
-                linea_strip = linea.strip()
-                # Intentar con separador ":"
-                if re.search(r"[Nn]ombre\s+profe", linea_strip):
-                    # Con dos puntos: "Nombre profesor: Muñoz Juan"
-                    m = re.search(r"[Nn]ombre\s+profe[^:]*:\s*(.+)", linea_strip)
-                    if m:
-                        _nombre_docente_raw = m.group(1).strip()
-                        break
-                    # Sin dos puntos: "Nombre profesorMuñoz Juan" o "Nombre profesor Muñoz Juan"
-                    m2 = re.search(r"[Nn]ombre\s+[Pp]rofesor[a]?\s+(.+)", linea_strip)
-                    if m2:
-                        _nombre_docente_raw = m2.group(1).strip()
-                        break
-            # Fallback: tomar del nombre del archivo si está disponible
-            if not _nombre_docente_raw and ultimo_informe:
-                nombre_arch = ultimo_informe.get("nombre", "")
-                # Formato: CICLO_ESCUELA_CURSO_PrimerNombrePrimerApellido.docx
-                partes_arch = nombre_arch.replace(".docx", "").split("_")
-                if len(partes_arch) >= 4:
-                    _nombre_docente_raw = partes_arch[-1]  # ej: "JuanMuñoz" → tratar como 1 palabra
-        except Exception:
-            pass
+    # Extraer nombre del docente — solo si el informe cambió (se cachea en session_state)
+    _cache_key = informe_nombre_base or ""
+    if st.session_state.get("_nombre_docente_cache_key") != _cache_key:
+        _nombre_docente_raw = ""
+        if informe_bytes_base is not None:
+            try:
+                _info_tmp = extraer_texto_informe_actual(informe_bytes_base)
+                for linea in _info_tmp.get("portada", "").splitlines():
+                    linea_strip = linea.strip()
+                    if re.search(r"[Nn]ombre\s+profe", linea_strip):
+                        m = re.search(r"[Nn]ombre\s+profe[^:]*:\s*(.+)", linea_strip)
+                        if m:
+                            _nombre_docente_raw = m.group(1).strip()
+                            break
+                        m2 = re.search(r"[Nn]ombre\s+[Pp]rofesor[a]?\s+(.+)", linea_strip)
+                        if m2:
+                            _nombre_docente_raw = m2.group(1).strip()
+                            break
+                if not _nombre_docente_raw and ultimo_informe:
+                    nombre_arch = ultimo_informe.get("nombre", "")
+                    partes_arch = nombre_arch.replace(".docx", "").split("_")
+                    if len(partes_arch) >= 4:
+                        _nombre_docente_raw = partes_arch[-1]
+            except Exception:
+                pass
+        st.session_state["_nombre_docente_cache_key"] = _cache_key
+        st.session_state["_nombre_docente_cache"] = _nombre_docente_raw
+    else:
+        _nombre_docente_raw = st.session_state.get("_nombre_docente_cache", "")
 
     if _nombre_docente_raw:
         _trat, _pnombre, _genero = _tratamiento(_nombre_docente_raw)
@@ -2361,12 +2415,67 @@ if PAGINA == "consideraciones":
         "- Usa SOLO los recursos del catálogo proporcionado; no inventes ni agregues otros."
     )
 
+    # Cargar prompt guardado en GitHub (si existe) como valor inicial
+    _prompt_guardado = None
+    if _GH_TOKEN:
+        try:
+            _prompt_guardado = _gh_cargar_prompt_cached(_GH_TOKEN)
+        except Exception:
+            pass
+    _prompt_inicial = _prompt_guardado if _prompt_guardado else PROMPT_BASE_USUARIO
+
     instruccion_usuaria = st.text_area(
         "Instrucciones para la IA",
-        value=PROMPT_BASE_USUARIO,
+        value=_prompt_inicial,
         height=380,
         help="Puedes modificar o agregar instrucciones. Este texto se envía directamente a la IA.",
+        key="prompt_ia_editor",
     )
+
+    col_guardar, col_restaurar = st.columns([2, 1])
+    with col_guardar:
+        if st.button("💾  Guardar prompt para siempre", use_container_width=True,
+                     help="Guarda este prompt en GitHub. Se cargará automáticamente en todas las sesiones futuras."):
+            if _GH_TOKEN:
+                try:
+                    with st.spinner("Guardando prompt…"):
+                        ok = _gh_guardar_prompt(_GH_TOKEN, instruccion_usuaria)
+                    if ok:
+                        _gh_cargar_prompt_cached.clear()   # limpiar cache para que cargue el nuevo
+                        st.success("✅ Prompt guardado. Se usará en todas las sesiones futuras.")
+                    else:
+                        st.error("❌ No se pudo guardar el prompt en GitHub.")
+                except Exception as e:
+                    st.error(f"❌ Error al guardar: {e}")
+            else:
+                st.warning("⚠️ Sin GITHUB_TOKEN configurado no se puede guardar.")
+    with col_restaurar:
+        if st.button("↩️  Restaurar por defecto", use_container_width=True,
+                     help="Borra el prompt guardado y vuelve al prompt original del sistema."):
+            if _GH_TOKEN:
+                try:
+                    sha = _gh_get_file_sha(_GH_TOKEN, _GH_PROMPT_FILE)
+                    if sha:
+                        url_del = f"https://api.github.com/repos/{_GH_REPO}/contents/{_GH_PROMPT_FILE}"
+                        payload_del = _json.dumps({
+                            "message": "Restaurar prompt por defecto",
+                            "sha": sha, "branch": "main"
+                        }).encode()
+                        req_del = urllib.request.Request(url_del, data=payload_del,
+                                                         method="DELETE", headers={
+                            "Authorization": f"Bearer {_GH_TOKEN}",
+                            "Accept": "application/vnd.github+json",
+                            "Content-Type": "application/json",
+                            "X-GitHub-Api-Version": "2022-11-28",
+                        })
+                        urllib.request.urlopen(req_del, timeout=15)
+                    _gh_cargar_prompt_cached.clear()
+                    st.success("✅ Prompt restaurado al valor por defecto. Recarga la página para verlo.")
+                except Exception as e:
+                    st.error(f"❌ Error al restaurar: {e}")
+            else:
+                st.warning("⚠️ Sin GITHUB_TOKEN configurado.")
+
     st.markdown('</div>', unsafe_allow_html=True)
 
     # ── Estado de sesión para el texto generado ──
