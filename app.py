@@ -2590,15 +2590,32 @@ if PAGINA == "consideraciones":
                         st.session_state.consideraciones_docx_bytes, texto_editado
                     )
                 nombre_final = st.session_state.consideraciones_nombre_archivo
-                st.success(f"✅ Informe actualizado: **{nombre_final}**")
-                st.download_button(
-                    label="⬇️  Descargar informe con Consideraciones",
-                    data=docx_final,
-                    file_name=nombre_final,
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                )
+                st.session_state["_docx_final_bytes"] = docx_final
+                st.session_state["_docx_final_nombre"] = nombre_final
             except RuntimeError as e:
                 st.error(f"❌ {e}")
             except Exception as e:
                 st.error(f"❌ Error al insertar Consideraciones en el informe: {e}")
+
+    # Mostrar descarga si ya está lista
+    if st.session_state.get("_docx_final_bytes"):
+        st.success(f"✅ Informe listo: **{st.session_state['_docx_final_nombre']}**")
+        col_dl, col_next = st.columns([2, 1])
+        with col_dl:
+            st.download_button(
+                label="⬇️  Descargar informe con Consideraciones",
+                data=st.session_state["_docx_final_bytes"],
+                file_name=st.session_state["_docx_final_nombre"],
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+            )
+        with col_next:
+            if st.button("➡️  Siguiente informe", use_container_width=True,
+                         help="Limpia todo y deja la página lista para el siguiente docente."):
+                for _k in ["_docx_final_bytes", "_docx_final_nombre",
+                           "consideraciones_texto", "consideraciones_docx_bytes",
+                           "consideraciones_nombre_archivo", "_nombre_docente_cache_key",
+                           "_nombre_docente_cache", "_consideraciones_informe_key"]:
+                    st.session_state.pop(_k, None)
+                st.rerun()
 
