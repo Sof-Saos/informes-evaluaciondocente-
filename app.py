@@ -834,8 +834,9 @@ GITHUB_MODELS_URL   = "https://models.github.ai/inference/chat/completions"
 GITHUB_MODELS_MODEL = "openai/gpt-4o"
 MAX_CHARS_CONTEXTO  = 16000   # ~4000 tokens — margen seguro para gpt-4o (límite: 8000 tokens)
 
+@st.cache_data(show_spinner=False)
 def extraer_texto_referencia(nombre_archivo: str, contenido: bytes) -> str:
-    """Extrae texto plano de un archivo de referencia (.pdf, .docx, .txt)."""
+    """Extrae texto plano de un archivo de referencia (.pdf, .docx, .txt). Resultado cacheado."""
     ext = nombre_archivo.lower().rsplit(".", 1)[-1] if "." in nombre_archivo else ""
     try:
         if ext == "txt":
@@ -1883,7 +1884,7 @@ def _gh_delete_doc_guia(token: str, nombre: str) -> bool:
     with urllib.request.urlopen(req, timeout=30) as r:
         return r.status in (200, 201)
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def _gh_listar_docs_guia(token: str) -> list[dict]:
     """
     Lista los documentos guardados en docs_guia/ del repo.
@@ -2094,6 +2095,16 @@ if PAGINA == "consideraciones":
     informe_nombre_base = None
 
     if not usar_otro and ultimo_informe is not None:
+        # Detectar si el informe cambió respecto al que teníamos cacheado
+        _informe_key = ultimo_informe.get("nombre", "")
+        if st.session_state.get("_consideraciones_informe_key") != _informe_key:
+            # Informe nuevo — limpiar consideraciones anteriores y forzar refresco
+            st.session_state["_consideraciones_informe_key"] = _informe_key
+            for k in ["consideraciones_texto", "consideraciones_docx_bytes",
+                      "consideraciones_nombre_archivo", "_nombre_docente_cache"]:
+                st.session_state.pop(k, None)
+            st.rerun()
+
         st.success(f"✅ Documento generado encontrado: **{ultimo_informe['nombre']}**")
         informe_bytes_base  = ultimo_informe["bytes"]
         informe_nombre_base = ultimo_informe["nombre"]
