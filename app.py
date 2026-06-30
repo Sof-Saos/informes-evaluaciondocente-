@@ -831,7 +831,12 @@ def _spider_chart_png(notas: dict) -> bytes:
 # aspectos formativos, firma) no se toca en absoluto.
 
 GITHUB_MODELS_URL   = "https://models.github.ai/inference/chat/completions"
-GITHUB_MODELS_MODEL = "openai/gpt-4o"
+GITHUB_MODELS_FALLBACK = [
+    "openai/gpt-4o",
+    "openai/gpt-4o-mini",
+    "meta/Meta-Llama-3.1-405B-Instruct",
+    "mistral-ai/Mistral-Large-2411",
+]
 MAX_CHARS_CONTEXTO  = 16000   # ~4000 tokens — margen seguro para gpt-4o (límite: 8000 tokens)
 
 @st.cache_data(show_spinner=False)
@@ -972,14 +977,11 @@ def _tratamiento(nombre_completo: str) -> tuple[str, str, str]:
     primer = _primer_nombre(nombre_completo)
     return trat, primer, genero
 
-def llamar_github_models(token: str, prompt_sistema: str, prompt_usuario: str,
-                          max_tokens: int = 1500, temperature: float = 0.4) -> str:
-    """
-    Llama a GitHub Models (chat completions) con gpt-4o y devuelve el texto de la respuesta.
-    Lanza una excepción con mensaje claro si falla (token inválido, rate limit, etc.)
-    """
+def _llamar_un_modelo(token: str, modelo: str, prompt_sistema: str, prompt_usuario: str,
+                       max_tokens: int, temperature: float) -> str:
+    """Llama a un modelo específico de GitHub Models. Lanza excepción si falla."""
     payload = {
-        "model": GITHUB_MODELS_MODEL,
+        "model": modelo,
         "messages": [
             {"role": "system", "content": prompt_sistema},
             {"role": "user", "content": prompt_usuario},
@@ -993,19 +995,43 @@ def llamar_github_models(token: str, prompt_sistema: str, prompt_usuario: str,
         "Content-Type": "application/json",
         "Accept": "application/vnd.github+json",
     })
-    try:
-        with _urlreq.urlopen(req, timeout=90) as r:
-            resultado = _json.loads(r.read())
-        return resultado["choices"][0]["message"]["content"].strip()
-    except _urlerr.HTTPError as e:
-        cuerpo = e.read().decode(errors="replace")
-        if e.code == 401:
-            raise RuntimeError("Token de GitHub Models inválido o sin el permiso 'models: read'.") from e
-        elif e.code == 429:
-            raise RuntimeError("Se alcanzó el límite de solicitudes del tier gratuito (15/min o 150/día). "
-                               "Espera un momento e inténtalo de nuevo.") from e
-        else:
-            raise RuntimeError(f"Error de GitHub Models ({e.code}): {cuerpo[:300]}") from e
+    with _urlreq.urlopen(req, timeout=60) as r:
+        resultado = _json.loads(r.read())
+    return resultado["choices"][0]["message"]["content"].strip()
+
+
+def llamar_github_models(token: str, prompt_sistema: str, prompt_usuario: str,
+                          max_tokens: int = 1500, temperature: float = 0.4) -> str:
+    """
+    Llama a GitHub Models probando una cadena de modelos de respaldo (fallback en cascada).
+    Si un modelo falla por rate limit (429), error de servidor (5xx), o timeout,
+    intenta automáticamente con el siguiente modelo de la lista — sin que el usuario
+    tenga que hacer nada. Solo lanza excepción si TODOS los modelos fallan.
+    """
+    errores = []
+    for i, modelo in enumerate(GITHUB_MODELS_FALLBACK):
+        try:
+            return _llamar_un_modelo(token, modelo, prompt_sistema, prompt_usuario,
+                                     max_tokens, temperature)
+        except _urlerr.HTTPError as e:
+            cuerpo = e.read().decode(errors="replace")
+            if e.code == 401:
+                # Token inválido — no tiene sentido reintentar con otro modelo
+                raise RuntimeError("Token de GitHub Models inválido o sin el permiso 'models: read'.") from e
+            errores.append(f"{modelo}: HTTP {e.code}")
+            if e.code == 429 or e.code >= 500:
+                continue   # probar siguiente modelo
+            else:
+                raise RuntimeError(f"Error de GitHub Models con {modelo} ({e.code}): {cuerpo[:300]}") from e
+        except (TimeoutError, _urlerr.URLError) as e:
+            errores.append(f"{modelo}: timeout/conexión")
+            continue   # probar siguiente modelo
+
+    raise RuntimeError(
+        "Se alcanzó el límite de solicitudes en todos los modelos disponibles "
+        f"({', '.join(GITHUB_MODELS_FALLBACK)}). Espera unos minutos e inténtalo de nuevo. "
+        f"Detalle: {' | '.join(errores)}"
+    )
 
 
 def generar_consideraciones_ia(token: str, info_informe: dict, contexto_docs: str,
